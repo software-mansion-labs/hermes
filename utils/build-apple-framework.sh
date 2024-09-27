@@ -73,7 +73,8 @@ function configure_apple_framework {
     -DHERMES_ENABLE_TOOLS:BOOLEAN="$build_cli_tools" \
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DHERMESVM_ALLOW_JIT=2
 }
 
 # Utility function to build an Apple framework

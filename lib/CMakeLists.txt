@@ -165,6 +165,34 @@ target_link_libraries(hermesvmlean_a PUBLIC
 # CMake requires at least one file for the target, so create an empty file.
 add_library(hermesvm SHARED dummy.cpp)
 add_library(hermesvmlean SHARED dummy.cpp)
+
+set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
+
+set_target_properties(hermesvm PROPERTIES
+  FRAMEWORK TRUE
+  VERSION ${PROJECT_VERSION}
+  SOVERSION ${PROJECT_VERSION}
+  FRAMEWORK_VERSION ${PROJECT_VERSION_MAJOR}
+  MACOSX_FRAMEWORK_SHORT_VERSION_STRING ${PROJECT_VERSION}
+  MACOSX_FRAMEWORK_BUNDLE_VERSION ${PROJECT_VERSION}
+  MACOSX_FRAMEWORK_IDENTIFIER dev.hermesengine.${HERMES_APPLE_TARGET_PLATFORM}
+)
+
+add_custom_command(TARGET hermesvm POST_BUILD
+  COMMAND /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string ${CMAKE_OSX_DEPLOYMENT_TARGET}" $<TARGET_FILE_DIR:hermesvm>/Info.plist
+)
+
+install(TARGETS hermesvm
+  RUNTIME DESTINATION bin
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  FRAMEWORK DESTINATION Library/Frameworks/${HERMES_APPLE_TARGET_PLATFORM}
+)
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
+  FILES_MATCHING PATTERN "*.h"
+  PATTERN "synthtest" EXCLUDE)
+
 # Force the entire hermesvm_a library to be used by hermesvm. There is
 # no cross platform way to do this (force_load is for macOS). Once we upgrade
 # CMake 3.24, we can use the LINK_LIBRARY generator expression to do this.
@@ -172,21 +200,22 @@ add_library(hermesvmlean SHARED dummy.cpp)
 # having its dependencies added to the link line of things that depend on it.
 # That is, we do not want libraries that depend on hermesvm to link in an extra
 # copy of any static libraries linked into it.
-if(APPLE)
-  target_link_libraries(hermesvm PRIVATE -force_load hermesvm_a)
-  target_link_libraries(hermesvmlean PRIVATE -force_load hermesvmlean_a)
-else()
-  target_link_libraries(hermesvm PRIVATE
-    -Wl,--whole-archive
-    hermesvm_a
-    -Wl,--no-whole-archive
-  )
-  target_link_libraries(hermesvmlean PRIVATE
-    -Wl,--whole-archive
-    hermesvmlean_a
-    -Wl,--no-whole-archive
-  )
-endif()
+# if(APPLE)
+  target_link_libraries(hermesvm PUBLIC -force_load hermesvm_a)
+  target_link_libraries(hermesvmlean PUBLIC -force_load hermesvmlean_a)
+  add_custom_target(build_hermesvm ALL DEPENDS hermesvm)
+# else()
+#   target_link_libraries(hermesvm PRIVATE
+#     -Wl,--whole-archive
+#     hermesvm_a
+#     -Wl,--no-whole-archive
+#   )
+#   target_link_libraries(hermesvmlean PRIVATE
+#     -Wl,--whole-archive
+#     hermesvmlean_a
+#     -Wl,--no-whole-archive
+#   )
+# endif()
 
 # Since we use private dependencies above, we need to enumerate all the headers
 # that should be available to consumers of hermesvm. Note that we only expose
@@ -197,13 +226,13 @@ target_include_directories(hermesvm PUBLIC ${CMAKE_SOURCE_DIR}/public ${CMAKE_SO
 # that depend on hermesvm. If JSI is built as a shared library, ensure it is
 # added to the link line for anything that depends on hermesvm. If it's a static
 # library, ensure it isn't since that would link in JSI twice.
-if (HERMES_BUILD_SHARED_JSI)
+# if (HERMES_BUILD_SHARED_JSI)
   target_link_libraries(hermesvm PUBLIC jsi)
-endif()
+# endif()
 
 # Apply additional linker flags.
-target_link_options(hermesvm PRIVATE ${HERMES_EXTRA_LINKER_FLAGS})
-target_link_options(hermesvmlean PRIVATE ${HERMES_EXTRA_LINKER_FLAGS})
+target_link_options(hermesvm PUBLIC ${HERMES_EXTRA_LINKER_FLAGS})
+target_link_options(hermesvmlean PUBLIC ${HERMES_EXTRA_LINKER_FLAGS})
 
 if(HERMES_ENABLE_INTL)
   set(INTL_OBJ_LIBS hermesPlatformIntl_obj hermesBCP47Parser_obj)
