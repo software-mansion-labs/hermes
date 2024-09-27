@@ -166,7 +166,8 @@ void FastArray::_snapshotAddEdgesImpl(
       HeapSnapshot::EdgeType::Internal,
       "elements",
       gc.getObjectID(indexedStorage));
-  for (uint32_t i = 0, e = self->getLength(gc.getPointerBase()); i < e; i++) {
+  for (uint32_t i = 0, e = self->getLengthAsUint32(gc.getPointerBase()); i < e;
+       i++) {
     const auto &elem = indexedStorage->at(i);
     const llvh::Optional<HeapSnapshot::NodeID> elemID =
         gc.getSnapshotID(elem.toHV(gc.getPointerBase()));
@@ -182,7 +183,7 @@ bool FastArray::_haveOwnIndexedImpl(
     Runtime &runtime,
     uint32_t index) {
   // Check whether the index is within the storage.
-  return index < vmcast<FastArray>(selfObj)->getLength(runtime);
+  return index < vmcast<FastArray>(selfObj)->getLengthAsUint32(runtime);
 }
 
 OptValue<PropertyFlags> FastArray::_getOwnIndexedPropertyFlagsImpl(
@@ -190,7 +191,7 @@ OptValue<PropertyFlags> FastArray::_getOwnIndexedPropertyFlagsImpl(
     Runtime &runtime,
     uint32_t index) {
   // Check whether the index is within the storage.
-  if (index < vmcast<FastArray>(selfObj)->getLength(runtime)) {
+  if (index < vmcast<FastArray>(selfObj)->getLengthAsUint32(runtime)) {
     PropertyFlags pf{};
     pf.enumerable = 1;
     pf.writable = 1;
@@ -203,7 +204,7 @@ OptValue<PropertyFlags> FastArray::_getOwnIndexedPropertyFlagsImpl(
 std::pair<uint32_t, uint32_t> FastArray::_getOwnIndexedRangeImpl(
     JSObject *selfObj,
     PointerBase &runtime) {
-  return {0, vmcast<FastArray>(selfObj)->getLength(runtime)};
+  return {0, vmcast<FastArray>(selfObj)->getLengthAsUint32(runtime)};
 }
 
 HermesValue FastArray::_getOwnIndexedImpl(
@@ -212,9 +213,10 @@ HermesValue FastArray::_getOwnIndexedImpl(
     uint32_t index) {
   NoHandleScope noHandles{runtime};
   auto *self = vmcast<FastArray>(selfObj.get());
-  if (index >= self->getLength(runtime))
+  auto *storage = self->indexedStorage_.getNonNull(runtime);
+  if (index >= storage->size())
     return HermesValue::encodeEmptyValue();
-  return self->unsafeAt(runtime, index).unboxToHV(runtime);
+  return storage->at(index).unboxToHV(runtime);
 }
 
 CallResult<bool> FastArray::_setOwnIndexedImpl(
