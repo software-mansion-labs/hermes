@@ -3,9 +3,65 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+if(HERMES_ENABLE_DEBUGGER)
+  # Some inspector sources need to be built without RTTI because they consume
+  # internal data structures compiled without RTTI.
+  set(INSPECTOR_NO_EH_RTTI_SOURCES
+    cdp/JSONValueInterfaces.cpp
+    cdp/MessageConverters.cpp
+    cdp/MessageInterfaces.cpp
+    cdp/MessageTypes.cpp
+    inspector/chrome/JSONValueInterfaces.cpp
+    inspector/chrome/MessageConverters.cpp
+    inspector/chrome/MessageInterfaces.cpp
+    inspector/chrome/MessageTypes.cpp
+  )
+
+  if (NOT HERMES_ENABLE_EH_RTTI)
+    if (GCC_COMPATIBLE)
+      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+        PROPERTY COMPILE_FLAGS "-fno-exceptions -fno-rtti")
+    elseif (MSVC)
+      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+        PROPERTY COMPILE_FLAGS "/EHs-c- /GR-")
+    endif ()
+  endif ()
+
+  set(CDP_API_SOURCES
+    cdp/CDPAgent.cpp
+    cdp/CallbackOStream.cpp
+    cdp/ConsoleMessage.cpp
+    cdp/DebuggerDomainAgent.cpp
+    cdp/HeapProfilerDomainAgent.cpp
+    cdp/ProfilerDomainAgent.cpp
+    cdp/RemoteObjectConverters.cpp
+    cdp/RemoteObjectsTable.cpp
+    cdp/RuntimeDomainAgent.cpp
+    cdp/ConsoleMessage.cpp
+    cdp/CDPDebugAPI.cpp
+    cdp/DomainState.cpp
+  )
+
+  set(INSPECTOR_API_SOURCES
+    inspector/chrome/CallbackOStream.cpp
+    inspector/chrome/CDPHandler.cpp
+    inspector/chrome/RemoteObjectConverters.cpp
+    inspector/chrome/RemoteObjectsTable.cpp
+    inspector/RuntimeAdapter.cpp
+    ${CDP_API_SOURCES}
+    ${INSPECTOR_NO_EH_RTTI_SOURCES}
+  )
+
+  # Even in lean builds, the inspector needs the parser to parse JSON.
+  set(INSPECTOR_DEPS hermesParser)
+endif()
+
 set(api_sources
   hermes.cpp
   DebuggerAPI.cpp
+  AsyncDebuggerAPI.cpp
+  RuntimeTaskRunner.cpp
+  ${INSPECTOR_API_SOURCES}
   )
 
 file(GLOB api_headers ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
@@ -26,7 +82,7 @@ endif()
 
 add_hermes_library(hermesapiLean
         ${api_sources}
-        LINK_OBJLIBS hermesPublic LINK_LIBS jsi)
+        LINK_OBJLIBS hermesPublic LINK_LIBS jsi hermesParser)
 target_include_directories(hermesapiLean_obj PUBLIC ..)
 target_compile_definitions(hermesapiLean_obj PUBLIC HERMESVM_LEAN)
 

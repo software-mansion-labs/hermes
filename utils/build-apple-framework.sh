@@ -63,6 +63,7 @@ function configure_apple_framework {
     -DCMAKE_OSX_ARCHITECTURES:STRING="$2" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET:STRING="$3" \
     -DHERMES_ENABLE_DEBUGGER:BOOLEAN=true \
+    -DHERMES_ENABLE_DEBUGGER=true \
     -DHERMES_ENABLE_INTL:BOOLEAN=true \
     -DHERMES_ENABLE_LIBFUZZER:BOOLEAN=false \
     -DHERMES_ENABLE_FUZZILLI:BOOLEAN=false \
@@ -73,7 +74,7 @@ function configure_apple_framework {
     -DHERMES_ENABLE_TOOLS:BOOLEAN="$build_cli_tools" \
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
-    -DCMAKE_BUILD_TYPE="Release"
+    -DCMAKE_BUILD_TYPE="Debug"
 }
 
 # Utility function to build an Apple framework
