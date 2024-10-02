@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 . ./utils/build-apple-framework.sh
-
+rm -rf destroot
 if [ ! -d destroot/Library/Frameworks/universal/hermes.xcframework ]; then
     ios_deployment_target=$(get_ios_deployment_target)
 
@@ -14,6 +14,7 @@ if [ ! -d destroot/Library/Frameworks/universal/hermes.xcframework ]; then
     # build_apple_framework "catalyst" "x86_64;arm64" "$ios_deployment_target"
 
     # create_universal_framework "iphoneos" "iphonesimulator" "catalyst"
+    create_universal_framework "iphonesimulator"
 else
     echo "Skipping; Clean \"destroot\" to rebuild".
 fi

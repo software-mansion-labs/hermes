@@ -38,3 +38,4 @@ cmake-build*/
 
 # clangd cache
 .cache/
+playground/

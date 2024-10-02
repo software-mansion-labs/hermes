@@ -40,7 +40,7 @@ function get_mac_deployment_target {
 # Build host hermes compiler for internal bytecode
 function build_host_hermesc {
   cmake -S . -B build_host_hermesc
-  cmake --build ./build_host_hermesc --target hermesc
+  cmake --build ./build_host_hermesc --target hermesc -j 10
 }
 
 # Utility function to configure an Apple framework
@@ -73,8 +73,7 @@ function configure_apple_framework {
     -DHERMES_ENABLE_TOOLS:BOOLEAN="$build_cli_tools" \
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DHERMESVM_ALLOW_JIT=2
+    -DCMAKE_BUILD_TYPE="Release"
 }
 
 # Utility function to build an Apple framework
@@ -88,7 +87,7 @@ function build_apple_framework {
   configure_apple_framework "$1" "$2" "$3"
 
   if [[ "$BUILD_SYSTEM" == "Ninja" ]]; then
-    (cd "./build_$1" && ninja install/strip)
+    (cd "./build_$1" && ninja install/strip -j 10)
   else
     (cd "./build_$1" && make install/strip)
   fi

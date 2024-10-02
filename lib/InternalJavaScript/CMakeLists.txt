@@ -73,8 +73,8 @@ set(JS_COMPILER_FLAGS "-O" "-Wno-undefined-variable" "-g0")
 
 add_custom_command(
   OUTPUT InternalBytecode.hbc
-  COMMAND /Users/piaskowyk/project/hermes/build_host_hermesc/bin/hermesc ${JS_COMPILER_FLAGS} -emit-binary -out=${CMAKE_CURRENT_BINARY_DIR}/InternalBytecode.hbc ${CMAKE_CURRENT_BINARY_DIR}/InternalBytecode.js
-  DEPENDS /Users/piaskowyk/project/hermes/build_host_hermesc/bin/hermesc InternalBytecode.js
+  COMMAND /Users/piaskowyk/project/hermes/build_static_hermes/bin/hermesc ${JS_COMPILER_FLAGS} -emit-binary -out=${CMAKE_CURRENT_BINARY_DIR}/InternalBytecode.hbc ${CMAKE_CURRENT_BINARY_DIR}/InternalBytecode.js
+  DEPENDS /Users/piaskowyk/project/hermes/build_static_hermes/bin/hermesc InternalBytecode.js
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   VERBATIM
 )
