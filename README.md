@@ -41,7 +41,8 @@ It will use the bre-built hermes binaries that we are distributing via the relea
  def download_stable_hermes(react_native_path, version, configuration)
 ```
 
-Note that this patches files under `node_module` directory, so if you re-install node modules after this step, or want to share it with others using your repo, you need to use some tool like [patch-package](https://github.com/ds300/patch-package).
+Note that this patches files under `node_module` directory, so if you re-install node modules after this step you may lose those changes.
+If you want to commit this to version control, we recommend you use some tool like [patch-package](https://github.com/ds300/patch-package).
 
 ### 2. Rebuild iOS `Pods`
 ```bash
