@@ -7,10 +7,17 @@ add_hermes_library(hermesBCP47Parser BCP47Parser.cpp)
 
 if(HERMES_ENABLE_INTL)
   if(HERMES_IS_ANDROID)
+    add_subdirectory(/Users/piaskowyk/project/hermes/external/icu_decls icu4c)
     add_hermes_library(hermesPlatformIntl PlatformIntlAndroid.cpp
-        LINK_LIBS fbjni::fbjni
-        LINK_OBJLIBS hermesPublic
+        LINK_LIBS 
+        fbjni::fbjni
+        LINK_OBJLIBS 
+        hermesBCP47Parser
+        hermesPublic
+        icu4c
     )
+    hermes_link_icu(hermesPlatformIntl)
+    include_directories(/Users/piaskowyk/project/hermes/external/icu_decls)
     target_compile_options(hermesPlatformIntl_obj PRIVATE -frtti -fexceptions)
   elseif(APPLE)
     add_hermes_library(hermesPlatformIntl PlatformIntlApple.mm

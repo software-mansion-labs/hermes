@@ -24,10 +24,16 @@
 # /Users/piaskowyk/sandbox/hermestest/ios/Pods/hermes-engine/destroot/include/hermes/Public/RuntimeConfig.h
 
 # rm -r destroot build_host_hermesc build_static_hermes build_iphonesimulator .cache
+# debug
+export DEBUG=true && ./utils/build-ios-framework.sh
 cmake -S . -B build_static_hermes -G Ninja
-cmake --build ./build_static_hermes
-./utils/build-ios-framework.sh
+cmake --build ./build_static_hermes -j 10
+mkdir destroot/bin
+cp build_static_hermes/bin/{hermes,hermesc,hermes-lit} ./destroot/bin
 
 # release
+export DEBUG=false && ./utils/build-ios-framework.sh
 cmake -S . -B build_static_hermes -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build ./build_static_hermes --config Release -DCMAKE_BUILD_TYPE=Release -O3
+cmake --build ./build_static_hermes --config Release -j 10
+mkdir destroot/bin
+cp build_static_hermes/bin/{hermes,hermesc,hermes-lit} ./destroot/bin

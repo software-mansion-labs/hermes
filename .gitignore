@@ -39,3 +39,5 @@ cmake-build*/
 # clangd cache
 .cache/
 playground/
+destroot*
+staging/

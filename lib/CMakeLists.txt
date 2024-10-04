@@ -166,6 +166,8 @@ target_link_libraries(hermesvmlean_a PUBLIC
 add_library(hermesvm SHARED dummy.cpp)
 add_library(hermesvmlean SHARED dummy.cpp)
 
+if(APPLE)
+
 set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
 
 set_target_properties(hermesvm PROPERTIES
@@ -193,6 +195,8 @@ install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
   FILES_MATCHING PATTERN "*.h"
   PATTERN "synthtest" EXCLUDE)
 
+endif()
+
 # Force the entire hermesvm_a library to be used by hermesvm. There is
 # no cross platform way to do this (force_load is for macOS). Once we upgrade
 # CMake 3.24, we can use the LINK_LIBRARY generator expression to do this.
@@ -200,22 +204,22 @@ install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
 # having its dependencies added to the link line of things that depend on it.
 # That is, we do not want libraries that depend on hermesvm to link in an extra
 # copy of any static libraries linked into it.
-# if(APPLE)
+if(APPLE)
   target_link_libraries(hermesvm PUBLIC -force_load hermesvm_a)
   target_link_libraries(hermesvmlean PUBLIC -force_load hermesvmlean_a)
   add_custom_target(build_hermesvm ALL DEPENDS hermesvm)
-# else()
-#   target_link_libraries(hermesvm PRIVATE
-#     -Wl,--whole-archive
-#     hermesvm_a
-#     -Wl,--no-whole-archive
-#   )
-#   target_link_libraries(hermesvmlean PRIVATE
-#     -Wl,--whole-archive
-#     hermesvmlean_a
-#     -Wl,--no-whole-archive
-#   )
-# endif()
+else()
+  target_link_libraries(hermesvm PRIVATE
+    -Wl,--whole-archive
+    hermesvm_a
+    -Wl,--no-whole-archive
+  )
+  target_link_libraries(hermesvmlean PRIVATE
+    -Wl,--whole-archive
+    hermesvmlean_a
+    -Wl,--no-whole-archive
+  )
+endif()
 
 # Since we use private dependencies above, we need to enumerate all the headers
 # that should be available to consumers of hermesvm. Note that we only expose
