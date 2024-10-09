@@ -1,0 +1,1 @@
+cmake -S . -B build_host_hermes -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build ./build_host_hermes -j 10

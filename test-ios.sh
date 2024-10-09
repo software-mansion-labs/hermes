@@ -25,6 +25,9 @@
 
 # rm -r destroot build_host_hermesc build_static_hermes build_iphonesimulator .cache
 # debug
+
+# tar -czvf react-native-artifacts-hermes-ios-debug.tar.gz -C react-native-artifacts-hermes-ios-debug .
+
 export DEBUG=true && ./utils/build-ios-framework.sh
 cmake -S . -B build_static_hermes -G Ninja
 cmake --build ./build_static_hermes -j 10
