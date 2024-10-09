@@ -1817,7 +1817,23 @@ tailCall:
 
         INIT_STATE_FOR_CODEBLOCK(curCodeBlock);
         O1REG(Call) = res.getValue();
+
+#ifdef HERMES_ENABLE_DEBUGGER
+        // Only do the more expensive check for breakpoint location (in
+        // getRealOpCode) if there are breakpoints installed in the function
+        // we're returning into.
+        if (LLVM_UNLIKELY(curCodeBlock->getNumInstalledBreakpoints() > 0)) {
+          ip = IPADD(inst::getInstSize(
+              runtime.debugger_.getRealOpCode(curCodeBlock, CUROFFSET)));
+        } else {
+          // No breakpoints in the function being returned to, just use
+          // nextInstCall().
+          ip = nextInstCall(ip);
+        }
+#else
         ip = nextInstCall(ip);
+#endif
+
         DISPATCH;
       }
 
@@ -3024,7 +3040,7 @@ tailCall:
       }
       CASE(FastArrayLoad) {
         double idx = O3REG(FastArrayStore).getNumber();
-        uint32_t intIndex = unsafeTruncateDouble<uint32_t>(idx);
+        uint32_t intIndex = _sh_tryfast_f64_to_u32_cvt(idx);
         auto *storage = vmcast<FastArray>(O2REG(FastArrayStore))
                             ->unsafeGetIndexedStorage(runtime);
 
@@ -3039,7 +3055,7 @@ tailCall:
       }
       CASE(FastArrayStore) {
         double idx = O2REG(FastArrayStore).getNumber();
-        uint32_t intIndex = unsafeTruncateDouble<uint32_t>(idx);
+        uint32_t intIndex = _sh_tryfast_f64_to_u32_cvt(idx);
         CAPTURE_IP_ASSIGN(
             auto shv,
             SmallHermesValue::encodeHermesValue(
@@ -3117,26 +3133,19 @@ tailCall:
         DISPATCH;
       }
 
-      CASE(CreateThis) {
-        // Registers: output, prototype, closure.
-        if (LLVM_UNLIKELY(!vmisa<Callable>(O3REG(CreateThis)))) {
-          CAPTURE_IP(runtime.raiseTypeError("constructor is not callable"));
-          goto exception;
-        }
-        CAPTURE_IP_ASSIGN(
-            auto res,
-            Callable::newObject(
-                Handle<Callable>::vmcast(&O3REG(CreateThis)),
+      CASE(CreateThisForNew) {
+        CAPTURE_IP(
+            res = createThisImpl(
                 runtime,
-                O2REG(CreateThis).isObject()
-                    ? Handle<JSObject>::vmcast(&O2REG(CreateThis))
-                    : runtime.objectPrototype));
+                &O2REG(CreateThisForNew),
+                &O2REG(CreateThisForNew),
+                ip->iCreateThisForNew.op3,
+                curCodeBlock));
         if (LLVM_UNLIKELY(res == ExecutionStatus::EXCEPTION)) {
           goto exception;
         }
-        gcScope.flushToSmallCount(KEEP_HANDLES);
-        O1REG(CreateThis) = res->getHermesValue();
-        ip = NEXTINST(CreateThis);
+        O1REG(CreateThisForNew) = *res;
+        ip = NEXTINST(CreateThisForNew);
         DISPATCH;
       }
 

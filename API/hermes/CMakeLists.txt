@@ -6,6 +6,14 @@
 if(HERMES_ENABLE_DEBUGGER)
   # Some inspector sources need to be built without RTTI because they consume
   # internal data structures compiled without RTTI.
+
+  set(CDP_NO_EH_RTTI_SOURCES
+    cdp/JSONValueInterfaces.cpp
+    cdp/MessageConverters.cpp
+    cdp/MessageInterfaces.cpp
+    cdp/MessageTypes.cpp
+  )
+  
   set(INSPECTOR_NO_EH_RTTI_SOURCES
     cdp/JSONValueInterfaces.cpp
     cdp/MessageConverters.cpp
@@ -17,14 +25,19 @@ if(HERMES_ENABLE_DEBUGGER)
     inspector/chrome/MessageTypes.cpp
   )
 
-  if (NOT HERMES_ENABLE_EH_RTTI)
+  if (NOT HERMES_ENABLE_EH AND NOT HERMES_ENABLE_RTTI)
     if (GCC_COMPATIBLE)
-      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+      set_property(SOURCE ${CDP_NO_EH_RTTI_SOURCES} APPEND_STRING
         PROPERTY COMPILE_FLAGS "-fno-exceptions -fno-rtti")
     elseif (MSVC)
-      set_property(SOURCE ${INSPECTOR_NO_EH_RTTI_SOURCES} APPEND_STRING
+      set_property(SOURCE ${CDP_NO_EH_RTTI_SOURCES} APPEND_STRING
         PROPERTY COMPILE_FLAGS "/EHs-c- /GR-")
     endif ()
+  elseif (NOT HERMES_ENABLE_EH OR NOT HERMES_ENABLE_RTTI)
+    message(
+      FATAL_ERROR
+      "Currently only support having exceptions and RTTI having the same enable status."
+    )
   endif ()
 
   set(CDP_API_SOURCES
@@ -54,7 +67,10 @@ if(HERMES_ENABLE_DEBUGGER)
 
   # Even in lean builds, the inspector needs the parser to parse JSON.
   set(INSPECTOR_DEPS hermesParser)
+  set(CDP_DEPS hermesParser)
 endif()
+
+add_subdirectory(cdp)
 
 set(api_sources
   hermes.cpp
@@ -62,27 +78,32 @@ set(api_sources
   AsyncDebuggerAPI.cpp
   RuntimeTaskRunner.cpp
   ${INSPECTOR_API_SOURCES}
+  ${CDP_API_SOURCES}
   )
 
 file(GLOB api_headers ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 file(GLOB api_public_headers ${PROJECT_SOURCE_DIR}/public/hermes/Public/*.h)
 
-add_hermes_library(hermesapi
-  ${api_sources}
-  LINK_OBJLIBS hermesPublic LINK_LIBS jsi
-  )
-target_include_directories(hermesapi_obj PUBLIC ..)
-
 if(HERMES_THREAD_SAFETY_ANALYSIS)
+  set(TSA_SOURCES
+    AsyncDebuggerAPI.cpp
+    ${CDP_API_SOURCES}
+  )
   if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
-    set_property(SOURCE inspector/chrome/CDPHandler.cpp APPEND_STRING PROPERTY
-      COMPILE_FLAGS "-Wthread-safety -Werror=thread-safety-analysis -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS")
+    set_property(SOURCE ${TSA_SOURCES} APPEND_STRING PROPERTY
+      COMPILE_FLAGS "-Wthread-safety -Werror=thread-safety-analysis -Werror=thread-safety-precise -D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS")
   endif()
 endif()
 
+add_hermes_library(hermesapi
+  ${api_sources}
+  LINK_OBJLIBS hermesPublic LINK_LIBS jsi ${CDP_DEPS}
+  )
+target_include_directories(hermesapi_obj PUBLIC ..)
+
 add_hermes_library(hermesapiLean
         ${api_sources}
-        LINK_OBJLIBS hermesPublic LINK_LIBS jsi hermesParser)
+        LINK_OBJLIBS hermesPublic LINK_LIBS jsi hermesParser ${CDP_DEPS})
 target_include_directories(hermesapiLean_obj PUBLIC ..)
 target_compile_definitions(hermesapiLean_obj PUBLIC HERMESVM_LEAN)
 

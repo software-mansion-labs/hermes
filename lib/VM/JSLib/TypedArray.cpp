@@ -223,34 +223,60 @@ CallResult<HermesValue> typedArrayConstructorFromObject(
 }
 
 template <typename T, CellKind C>
-CallResult<HermesValue>
-typedArrayConstructor(void *, Runtime &runtime, NativeArgs args) {
+CallResult<HermesValue> typedArrayConstructor(
+    void *,
+    Runtime &runtime,
+    NativeArgs args,
+    const PinnedValue<NativeConstructor> *arrayConstructor,
+    const PinnedValue<JSObject> *arrayPrototype) {
   // 1. If NewTarget is undefined, throw a TypeError exception.
   if (!args.isConstructorCall()) {
     return runtime.raiseTypeError(
         "JSTypedArray() called in function context instead of constructor");
   }
-  auto self = args.vmcastThis<JSTypedArray<T, C>>();
+
+  struct : public Locals {
+    PinnedValue<JSObject> selfParent;
+    PinnedValue<JSTypedArray<T, C>> self;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  if (LLVM_LIKELY(
+          args.getNewTarget().getRaw() ==
+          arrayConstructor->getHermesValue().getRaw())) {
+    lv.selfParent = *arrayPrototype;
+  } else {
+    CallResult<PseudoHandle<JSObject>> thisParentRes =
+        NativeConstructor::parentForNewThis_RJS(
+            runtime,
+            Handle<Callable>::vmcast(&args.getNewTarget()),
+            *arrayPrototype);
+    if (LLVM_UNLIKELY(thisParentRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    lv.selfParent = std::move(*thisParentRes);
+  }
+  lv.self = JSTypedArray<T, C>::create(runtime, lv.selfParent);
+
   if (args.getArgCount() == 0) {
     // ES6 22.2.1.1
-    if (JSTypedArray<T, C>::createBuffer(runtime, self, 0) ==
+    if (JSTypedArray<T, C>::createBuffer(runtime, lv.self, 0) ==
         ExecutionStatus::EXCEPTION) {
       return ExecutionStatus::EXCEPTION;
     }
-    return self.getHermesValue();
+    return lv.self.getHermesValue();
   }
   auto firstArg = args.getArgHandle(0);
   if (!firstArg->isObject()) {
-    return typedArrayConstructorFromLength<T, C>(runtime, self, firstArg);
+    return typedArrayConstructorFromLength<T, C>(runtime, lv.self, firstArg);
   }
   if (auto otherTA = Handle<JSTypedArrayBase>::dyn_vmcast(firstArg)) {
-    return typedArrayConstructorFromTypedArray<T, C>(runtime, self, otherTA);
+    return typedArrayConstructorFromTypedArray<T, C>(runtime, lv.self, otherTA);
   }
   if (auto buffer = Handle<JSArrayBuffer>::dyn_vmcast(firstArg)) {
     return typedArrayConstructorFromArrayBuffer<T, C>(
-        runtime, self, buffer, args.getArgHandle(1), args.getArgHandle(2));
+        runtime, lv.self, buffer, args.getArgHandle(1), args.getArgHandle(2));
   }
-  return typedArrayConstructorFromObject<T, C>(runtime, self, firstArg);
+  return typedArrayConstructorFromObject<T, C>(runtime, lv.self, firstArg);
 }
 
 template <typename T, CellKind C, NativeFunctionPtr Ctor>
@@ -264,9 +290,7 @@ Handle<NativeConstructor> createTypedArrayConstructor(Runtime &runtime) {
       Ctor,
       proto,
       Handle<JSObject>::vmcast(&runtime.typedArrayBaseConstructor),
-      3,
-      NativeConstructor::creatorFunction<TA>,
-      C);
+      3);
 
   DefinePropertyFlags dpf = DefinePropertyFlags::getDefaultNewPropertyFlags();
   dpf.enumerable = 0;
@@ -580,11 +604,11 @@ typedArrayBaseConstructor(void *, Runtime &runtime, NativeArgs) {
 
 /// @}
 
-#define TYPED_ARRAY(name, type)                                    \
-  CallResult<HermesValue> name##ArrayConstructor(                  \
-      void *ctx, Runtime &rt, NativeArgs args) {                   \
-    return typedArrayConstructor<type, CellKind::name##ArrayKind>( \
-        ctx, rt, args);                                            \
+#define TYPED_ARRAY(name, type)                                               \
+  CallResult<HermesValue> name##ArrayConstructor(                             \
+      void *ctx, Runtime &rt, NativeArgs args) {                              \
+    return typedArrayConstructor<type, CellKind::name##ArrayKind>(            \
+        ctx, rt, args, &rt.name##ArrayConstructor, &rt.name##ArrayPrototype); \
   }
 #include "hermes/VM/TypedArrays.def"
 #undef TYPED_ARRAY
@@ -593,12 +617,8 @@ typedArrayBaseConstructor(void *, Runtime &runtime, NativeArgs) {
 CallResult<HermesValue>
 typedArrayFrom(void *, Runtime &runtime, NativeArgs args) {
   auto source = args.getArgHandle(0);
-  CallResult<bool> isConstructorRes = isConstructor(runtime, args.getThisArg());
-  if (LLVM_UNLIKELY(isConstructorRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
   // 1. Let C be the this value.
-  if (!*isConstructorRes) {
+  if (!isConstructor(runtime, args.getThisArg())) {
     // 2. If IsConstructor(C) is false, throw a TypeError exception.
     return runtime.raiseTypeError(
         "Cannot invoke when the this is not a constructor");
@@ -685,11 +705,7 @@ typedArrayOf(void *, Runtime &runtime, NativeArgs args) {
   // 2. Let items be the List of arguments passed to this function. (args is
   // items).
   // 3. Let C be the this value.
-  CallResult<bool> isConstructorRes = isConstructor(runtime, args.getThisArg());
-  if (LLVM_UNLIKELY(isConstructorRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
-  if (!*isConstructorRes) {
+  if (!isConstructor(runtime, args.getThisArg())) {
     // 4. If IsConstructor(C) is false, throw a TypeError exception.
     return runtime.raiseTypeError(
         "Cannot invoke %TypedArray%.of when %TypedArray% is not a constructor "
@@ -1757,9 +1773,7 @@ Handle<NativeConstructor> createTypedArrayBaseConstructor(Runtime &runtime) {
       Handle<JSObject>::vmcast(&runtime.functionPrototype),
       nullptr,
       typedArrayBaseConstructor,
-      0,
-      NativeConstructor::creatorFunction<JSObject>,
-      CellKind::JSObjectKind));
+      0));
 
   // Define %TypedArray%.prototype to be proto.
   auto st = Callable::defineNameLengthAndPrototype(

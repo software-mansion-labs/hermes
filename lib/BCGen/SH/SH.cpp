@@ -586,7 +586,18 @@ class InstrGen {
       os_ << ", ";
       generateRegisterPtr(*optValue);
     }
-    return os_ << ", get_prop_cache(shUnit) + " << nextCacheIdx_++;
+    os_ << ", ";
+    return genIC(LS);
+  }
+
+  /// Generate a cache index. This must be used when passing parameters to API
+  /// functions that will use the cache index.
+  /// \p LS is currently unused. In the future, it might be used in the
+  /// optimization controlled by OptimizationSettings::reusePropCache: that
+  /// different instructions accessing the same property probably are for
+  /// objects of the same hidden class, and should get the same offset.
+  llvh::raw_ostream &genIC(LiteralString *LS) {
+    return os_ << "get_prop_cache(shUnit) + " << nextCacheIdx_++;
   }
 
   /// Helper to generate a value in a register,
@@ -638,9 +649,10 @@ class InstrGen {
       os_ << "_sh_ljs_bool(" << boolStr(B->getValue()) << ")";
     } else if (auto LN = llvh::dyn_cast<LiteralNumber>(&val)) {
       os_ << "_sh_ljs_double(";
+      int32_t intval;
       if (!LN->isNegativeZero() &&
-          LN->getValue() == unsafeTruncateDouble<int>(LN->getValue())) {
-        os_ << static_cast<int>(LN->getValue());
+          sh_tryfast_f64_to_i32(LN->getValue(), intval)) {
+        os_ << intval;
       } else {
         os_ << "((struct HermesValueBase){.raw = "
             << llvh::DoubleToBits(LN->getValue()) << "u}).f64";
@@ -1608,7 +1620,7 @@ class InstrGen {
   }
   void generateUnreachableInst(UnreachableInst &inst) {
     os_.indent(2);
-    os_ << "abort();\n";
+    os_ << "_sh_unreachable();\n";
   }
   void generateCreateFunctionInst(CreateFunctionInst &inst) {
     os_.indent(2);
@@ -1863,12 +1875,20 @@ class InstrGen {
         << hbc::StackFrameLayout::ThisArg << "]);\n";
   }
   void generateCreateThisInst(CreateThisInst &inst) {
+    assert(
+        llvh::isa<EmptySentinel>(inst.getNewTarget()) &&
+        "CreateThis currently only supported for `new`");
     os_.indent(2);
     generateRegister(inst);
     os_ << " = _sh_ljs_create_this(shr, &";
-    generateRegister(*inst.getPrototype());
+    generateRegister(*inst.getClosure());
     os_ << ", &";
     generateRegister(*inst.getClosure());
+    os_ << ", ";
+    Module *M = F_.getParent();
+    auto *protoStr =
+        M->getLiteralString(M->getContext().getIdentifier("prototype"));
+    genIC(protoStr);
     os_ << ");\n";
   }
   void generateHBCGetArgumentsPropByValLooseInst(
@@ -2293,14 +2313,17 @@ bool lowerModuleIR(Module *M, bool optimize) {
   PM.addPass(new hbc::DedupReifyArguments());
   // TODO Consider supporting LowerSwitchIntoJumpTables for optimization
   PM.addPass(new SwitchLowering());
-  // OptEnvironmentInit checks for LiteralUndefined, so it needs to run before
-  // LoadConstants.
-  if (optimize)
+  if (optimize) {
+    // TODO(T204084366): TypeInference must run before OptEnvironmentInit,
+    // because the latter will remove stores that may affect the inferred type.
+    PM.addTypeInference();
+    // OptEnvironmentInit checks for LiteralUndefined, so it needs to run before
+    // LoadConstants.
     PM.addPass(createOptEnvironmentInit());
+  }
   PM.addPass(sh::createLoadConstants());
   PM.addPass(createLowerScopes());
   if (optimize) {
-    PM.addTypeInference();
     // Move loads to child blocks if possible.
     PM.addCodeMotion();
     // Eliminate common HBCLoadConstInsts.

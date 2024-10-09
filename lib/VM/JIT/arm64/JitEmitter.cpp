@@ -18,7 +18,6 @@
 #include "hermes/VM/Callable.h"
 #include "hermes/VM/Interpreter.h"
 #include "hermes/VM/StaticHUtils.h"
-#include "llvh/Support/SaveAndRestore.h"
 
 #define DEBUG_TYPE "jit"
 
@@ -124,13 +123,33 @@ void emit_double_is_int(
   a.fcmp(dTemp, dInput);
 }
 
+/// For a register \p dInput, which contains a double, check whether it is a
+/// valid unsigned 32-bit integer.
+/// CPU flags are updated. b_eq on success.
+/// If successful, \p wTemp will contain the number converted to int,
+/// and \p dTemp will contain the same number as \p dInput.
+/// \pre dTemp != dInput, because both are used in the comparison.
+void emit_double_is_uint32(
+    a64::Assembler &a,
+    const a64::GpW &wTemp,
+    const a64::VecD &dTemp,
+    const a64::VecD &dInput) {
+  assert(dTemp != dInput && "must use a different temp");
+  a.fcvtzu(wTemp, dInput);
+  a.ucvtf(dTemp, wTemp);
+  a.fcmp(dTemp, dInput);
+}
+
 class OurErrorHandler : public asmjit::ErrorHandler {
   asmjit::Error &expectedError_;
+  std::function<void(std::string &&message)> const longjmpError_;
 
  public:
   /// \param expectedError if we get an error matching this value, we ignore it.
-  explicit OurErrorHandler(asmjit::Error &expectedError)
-      : expectedError_(expectedError) {}
+  explicit OurErrorHandler(
+      asmjit::Error &expectedError,
+      const std::function<void(std::string &&message)> &longjmpError)
+      : expectedError_(expectedError), longjmpError_(longjmpError) {}
 
   void handleError(
       asmjit::Error err,
@@ -144,12 +163,33 @@ class OurErrorHandler : public asmjit::ErrorHandler {
       return;
     }
 
-    llvh::errs() << "AsmJit error: " << err << ": "
-                 << asmjit::DebugUtils::errorAsString(err) << ": " << message
-                 << "\n";
-    hermes_fatal("AsmJit error");
+    std::string formattedMsg{};
+    llvh::raw_string_ostream OS{formattedMsg};
+    OS << "AsmJit error: " << err << ": "
+       << asmjit::DebugUtils::errorAsString(err) << ": " << message;
+    OS.flush();
+
+    LLVM_DEBUG(llvh::dbgs() << formattedMsg << "\n");
+    longjmpError_(std::move(formattedMsg));
   }
 };
+
+/// This macro is used to catch and handle low probability instructing encoding
+/// errors - i.e. when an immediate operand doesn't fit in the instruction
+/// encoding. It causes Asmjit to just return an error code instead of
+/// terminating the entire compilation.
+///
+/// \param expValue the error value that we want to handle.
+/// \param code  C++ code to invoke asmjit and store the result in a variable.
+#define EXPECT_ERROR(expValue, code)          \
+  do {                                        \
+    assert(                                   \
+        expectedError_ == asmjit::kErrorOk && \
+        "expectedError_ is not cleared");     \
+    expectedError_ = (expValue);              \
+    code;                                     \
+    expectedError_ = asmjit::kErrorOk;        \
+  } while (0)
 
 class OurLogger : public asmjit::Logger {
   ASMJIT_API asmjit::Error _log(const char *data, size_t size) noexcept
@@ -191,7 +231,8 @@ Emitter::Emitter(
     PropertyCacheEntry *writePropertyCache,
     uint32_t numFrameRegs,
     unsigned numCount,
-    unsigned npCount)
+    unsigned npCount,
+    const std::function<void(std::string &&message)> &longjmpError)
     : dumpJitCode_(dumpJitCode),
       frameRegs_(numFrameRegs),
       codeBlock_(codeBlock) {
@@ -201,7 +242,7 @@ Emitter::Emitter(
     logger_->setIndentation(asmjit::FormatIndentationGroup::kCode, 4);
 
   errorHandler_ = std::unique_ptr<asmjit::ErrorHandler>(
-      new OurErrorHandler(expectedError_));
+      new OurErrorHandler(expectedError_, longjmpError));
 
   code.init(jitRT.environment(), jitRT.cpuFeatures());
   code.setErrorHandler(errorHandler_.get());
@@ -968,6 +1009,10 @@ void Emitter::frUpdateType(FR fr, FRType type) {
   frameRegs_[fr.index()].localType = type;
 }
 
+void Emitter::unreachable() {
+  EMIT_RUNTIME_CALL(*this, void (*)(), _sh_unreachable);
+}
+
 void Emitter::ret(FR frValue) {
   movHWFromFR(HWReg::gpX(22), frValue);
   a.b(returnLabel_);
@@ -1002,11 +1047,7 @@ void Emitter::loadParam(FR frRes, uint32_t paramIndex) {
           xFrame,
           (int)StackFrameLayout::ArgCount * (int)sizeof(SHLegacyValue)));
 
-  {
-    llvh::SaveAndRestore<asmjit::Error> sav(
-        expectedError_, asmjit::kErrorInvalidImmediate);
-    err = a.cmp(wTmp, paramIndex);
-  }
+  EXPECT_ERROR(asmjit::kErrorInvalidImmediate, err = a.cmp(wTmp, paramIndex));
   // Does paramIndex fit in the 12-bit unsigned immediate?
   if (err) {
     HWReg hwTmp2 = allocAndLogTempGpX();
@@ -1026,11 +1067,9 @@ void Emitter::loadParam(FR frRes, uint32_t paramIndex) {
       (int)sizeof(SHLegacyValue);
   if (ofs >= 0)
     hermes_fatal("JIT integer overflow");
-  {
-    llvh::SaveAndRestore<asmjit::Error> sav(
-        expectedError_, asmjit::kErrorInvalidDisplacement);
-    err = a.ldur(hwRes.a64GpX(), a64::Mem(xFrame, ofs));
-  }
+  EXPECT_ERROR(
+      asmjit::kErrorInvalidDisplacement,
+      err = a.ldur(hwRes.a64GpX(), a64::Mem(xFrame, ofs)));
   // Does the offset fit in the 9-bit signed offset?
   if (err) {
     ofs = -ofs;
@@ -1441,6 +1480,161 @@ void Emitter::newArrayWithBuffer(
   frUpdatedWithHW(frRes, hwRes);
 }
 
+void Emitter::newFastArray(FR frRes, uint32_t size) {
+  comment("// NewFastArray r%u, %u", frRes.index(), size);
+  syncAllFRTempExcept(frRes);
+  freeAllFRTempExcept({});
+  a.mov(a64::x0, xRuntime);
+  a.mov(a64::w1, size);
+  EMIT_RUNTIME_CALL(
+      *this, SHLegacyValue(*)(SHRuntime *, uint32_t), _sh_new_fastarray);
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
+void Emitter::fastArrayLength(FR frRes, FR frArr) {
+  comment("// FastArrayLength r%u, r%u", frRes.index(), frArr.index());
+  // We allocate a temporary register to compute the address instead of using
+  // the result register in case the result has a VecD allocated for it.
+  HWReg temp = allocTempGpX();
+  HWReg hwArr = getOrAllocFRInGpX(frArr, true);
+  // Done allocating, free the temp so it can be reused for the result.
+  freeReg(temp);
+  emit_sh_ljs_get_pointer(a, temp.a64GpX(), hwArr.a64GpX());
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
+  movHWFromMem(hwRes, a64::Mem(temp.a64GpX(), offsetof(SHFastArray, length)));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
+void Emitter::fastArrayLoad(FR frRes, FR frArr, FR frIdx) {
+  comment(
+      "// FastArrayLoad r%u, r%u, r%u",
+      frRes.index(),
+      frArr.index(),
+      frIdx.index());
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  // We allocate a temporary register to compute the address instead of using
+  // the result register in case the result has a VecD allocated for it.
+  HWReg hwTmpStorage = allocTempGpX();
+  HWReg hwTmpSize = allocTempGpX();
+  HWReg hwTmpIdxGpX = allocTempGpX();
+  HWReg hwTmpIdxVecD = allocTempVecD();
+  HWReg hwArr = getOrAllocFRInGpX(frArr, true);
+  HWReg hwIdx = getOrAllocFRInVecD(frIdx, true);
+  // Done allocating, free the temps so they can be reused for the result.
+  freeReg(hwTmpStorage);
+  freeReg(hwTmpSize);
+  freeReg(hwTmpIdxGpX);
+  freeReg(hwTmpIdxVecD);
+
+  // Retrieve the FastArray pointer and use it to load the indexed storage
+  // pointer.
+  emit_sh_ljs_get_pointer(a, hwTmpStorage.a64GpX(), hwArr.a64GpX());
+  movHWFromMem(
+      hwTmpStorage,
+      a64::Mem(hwTmpStorage.a64GpX(), offsetof(SHFastArray, indexedStorage)));
+
+  // Load the size from the indexed storage.
+  a.ldr(
+      hwTmpSize.a64GpX().w(),
+      a64::Mem(hwTmpStorage.a64GpX(), offsetof(SHArrayStorageSmall, size)));
+
+  // Check if the index is a uint32.
+  emit_double_is_uint32(
+      a, hwTmpIdxGpX.a64GpX().w(), hwTmpIdxVecD.a64VecD(), hwIdx.a64VecD());
+  // If the conversion was successful, compare the size against the index.
+  // Otherwise, set the flags to zero to force the subsequent b_ls to be taken.
+  a.ccmp(
+      hwTmpSize.a64GpX().w(), hwTmpIdxGpX.a64GpX().w(), 0, a64::CondCode::kEQ);
+  // If the index is out-of-bounds jump to the failure path.
+  // TODO: We currently disregard the state of the registers on an OOB access
+  // because we cannot JIT try-catch, so we are guaranteed to be leaving the
+  // current function. If we add support for JIT of try-catch, we will have to
+  // sync registers when the access is inside a try region.
+  a.b_ls(slowPathLab);
+
+  // Add the offset of the actual data in the ArrayStorage.
+  a.add(
+      hwTmpStorage.a64GpX(),
+      hwTmpStorage.a64GpX(),
+      offsetof(SHArrayStorageSmall, storage));
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
+  movHWFromMem(
+      hwRes,
+      a64::Mem(hwTmpStorage.a64GpX(), hwTmpIdxGpX.a64GpX(), a64::lsl(3)));
+  frUpdatedWithHW(frRes, hwRes);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .frRes = frRes,
+       .frInput1 = frArr,
+       .frInput2 = frIdx,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: FastArrayLoad r%u, r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index(),
+             sl.frInput2.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         EMIT_RUNTIME_CALL(em, void (*)(SHRuntime *), _sh_throw_array_oob);
+         // Call does not return.
+       }});
+}
+
+void Emitter::fastArrayStore(FR frArr, FR frIdx, FR frVal) {
+  comment(
+      "// FastArrayStore r%u, r%u, r%u",
+      frArr.index(),
+      frIdx.index(),
+      frVal.index());
+  syncAllFRTempExcept({});
+  syncToMem(frArr);
+  syncToMem(frVal);
+  freeAllFRTempExcept({});
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frVal);
+  loadFrameAddr(a64::x2, frArr);
+  movHWFromFR(HWReg{a64::d0}, frIdx);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(SHRuntime *, const SHLegacyValue *, SHLegacyValue *, double idx),
+      _sh_fastarray_store);
+}
+
+void Emitter::fastArrayPush(FR frArr, FR frVal) {
+  comment("// FastArrayPush r%u, r%u", frArr.index(), frVal.index());
+  syncAllFRTempExcept({});
+  syncToMem(frArr);
+  syncToMem(frVal);
+  freeAllFRTempExcept({});
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frVal);
+  loadFrameAddr(a64::x2, frArr);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+      _sh_fastarray_push);
+}
+
+void Emitter::fastArrayAppend(FR frArr, FR frOther) {
+  comment("// FastArrayAppend r%u, r%u", frArr.index(), frOther.index());
+  syncAllFRTempExcept({});
+  syncToMem(frArr);
+  syncToMem(frOther);
+  freeAllFRTempExcept({});
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frOther);
+  loadFrameAddr(a64::x2, frArr);
+  EMIT_RUNTIME_CALL(
+      *this,
+      void (*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+      _sh_fastarray_append);
+}
+
 void Emitter::getGlobalObject(FR frRes) {
   comment("// GetGlobalObject r%u", frRes.index());
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
@@ -1732,25 +1926,40 @@ void Emitter::getArgumentsLength(FR frRes, FR frLazyReg) {
        }});
 }
 
-void Emitter::createThis(FR frRes, FR frPrototype, FR frCallable) {
+void Emitter::createThis(
+    FR frRes,
+    FR frCallee,
+    FR frNewTarget,
+    uint8_t cacheIdx) {
   comment(
-      "// CreateThis r%u, r%u, r%u",
+      "// CreateThis r%u, r%u, r%u, cache %u",
       frRes.index(),
-      frPrototype.index(),
-      frCallable.index());
+      frCallee.index(),
+      frNewTarget.index(),
+      cacheIdx);
 
-  syncAllFRTempExcept(
-      frRes != frPrototype && frRes != frCallable ? frRes : FR());
-  syncToMem(frPrototype);
-  syncToMem(frCallable);
+  syncAllFRTempExcept(frRes != frCallee && frRes != frNewTarget ? frRes : FR());
+  syncToMem(frCallee);
+  syncToMem(frNewTarget);
   freeAllFRTempExcept({});
 
   a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frPrototype);
-  loadFrameAddr(a64::x2, frCallable);
+  loadFrameAddr(a64::x1, frCallee);
+  loadFrameAddr(a64::x2, frNewTarget);
+  if (cacheIdx == hbc::PROPERTY_CACHING_DISABLED) {
+    a.mov(a64::x3, 0);
+  } else {
+    a.ldr(a64::x3, a64::Mem(roDataLabel_, roOfsReadPropertyCachePtr_));
+    if (cacheIdx != 0)
+      a.add(a64::x3, a64::x3, sizeof(SHPropertyCacheEntry) * cacheIdx);
+  }
   EMIT_RUNTIME_CALL(
       *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+      SHLegacyValue(*)(
+          SHRuntime *,
+          SHLegacyValue *,
+          SHLegacyValue *,
+          SHPropertyCacheEntry *),
       _sh_ljs_create_this);
 
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
@@ -2208,18 +2417,12 @@ void Emitter::switchImm(
   // Convert the input to an integer and back to double,
   // and check if the value remained the same.
   // If it didn't, jump to the default label.
-  a.fcvtzu(wTempInput, dInput);
-  a.ucvtf(hwTempD.a64VecD(), wTempInput);
-  a.fcmp(dInput, hwTempD.a64VecD());
+  emit_double_is_uint32(a, wTempInput, hwTempD.a64VecD(), dInput);
   a.b_ne(defaultLabel);
 
   // Check if the integer value in xTemp is in range.
   // First check minVal.
-  {
-    llvh::SaveAndRestore<asmjit::Error> sav(
-        expectedError_, asmjit::kErrorInvalidImmediate);
-    err = a.cmp(wTempInput, minVal);
-  }
+  EXPECT_ERROR(asmjit::kErrorInvalidImmediate, err = a.cmp(wTempInput, minVal));
   if (err) {
     a.mov(hwTempTarget.a64GpX().w(), minVal);
     a.cmp(wTempInput, hwTempTarget.a64GpX().w());
@@ -2228,11 +2431,7 @@ void Emitter::switchImm(
   a.b_lo(defaultLabel);
 
   // Now check maxVal.
-  {
-    llvh::SaveAndRestore<asmjit::Error> sav(
-        expectedError_, asmjit::kErrorInvalidImmediate);
-    err = a.cmp(wTempInput, maxVal);
-  }
+  EXPECT_ERROR(asmjit::kErrorInvalidImmediate, err = a.cmp(wTempInput, maxVal));
   if (err) {
     a.mov(hwTempTarget.a64GpX().w(), maxVal);
     a.cmp(wTempInput, hwTempTarget.a64GpX().w());
@@ -2243,11 +2442,9 @@ void Emitter::switchImm(
   // Compute the offset into the jump table, dereference, and jump.
   // Offset by the minVal if necessary.
   if (minVal != 0) {
-    {
-      llvh::SaveAndRestore<asmjit::Error> sav(
-          expectedError_, asmjit::kErrorInvalidImmediate);
-      err = a.sub(wTempInput, wTempInput, minVal);
-    }
+    EXPECT_ERROR(
+        asmjit::kErrorInvalidImmediate,
+        err = a.sub(wTempInput, wTempInput, minVal));
     if (err) {
       a.mov(hwTempTarget.a64GpX().w(), minVal);
       a.sub(wTempInput, wTempInput, hwTempTarget.a64GpX().w());
@@ -2270,7 +2467,7 @@ void Emitter::switchImm(
       wTempInput,
       a64::Mem(xTempTarget, wTempInput, a64::Shift(a64::ShiftOp::kLSL, 2)));
   // Add the jump offset to the base of the table to get the target address.
-  a.add(xTempTarget, xTempTarget, wTempInput.x());
+  a.add(xTempTarget, xTempTarget, wTempInput.x(), a64::sxtw(0));
   // Branch to the target address.
   a.br(xTempTarget);
 

@@ -524,23 +524,19 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   runtime.textEncoderPrototype = JSObject::create(runtime);
 
   // Object constructor.
-  createObjectConstructor(runtime);
+  runtime.objectConstructor = createObjectConstructor(runtime);
 
-  // JSError constructor.
-  runtime.errorConstructor = createErrorConstructor(runtime);
-
-// All Native Error constructors.
-#define NATIVE_ERROR_TYPE(name)       \
-  create##name##Constructor(runtime); \
+// All Error constructors.
+#define ALL_ERROR_TYPE(name)                                      \
+  runtime.name##Constructor = create##name##Constructor(runtime); \
   gcScope.clearAllHandles();
-#define AGGREGATE_ERROR_TYPE(name) NATIVE_ERROR_TYPE(name)
 #include "hermes/VM/NativeErrorTypes.def"
 
   // Populate the internal CallSite prototype.
   populateCallSitePrototype(runtime);
 
   // String constructor.
-  createStringConstructor(runtime);
+  runtime.stringConstructor = createStringConstructor(runtime);
 
   // BigInt constructor.
   createBigIntConstructor(runtime);
@@ -549,26 +545,26 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   runtime.functionConstructor = createFunctionConstructor(runtime);
 
   // Number constructor.
-  createNumberConstructor(runtime);
+  runtime.numberConstructor = createNumberConstructor(runtime);
 
   // Boolean constructor.
-  createBooleanConstructor(runtime);
+  runtime.booleanConstructor = createBooleanConstructor(runtime);
 
   // Date constructor.
-  createDateConstructor(runtime);
+  runtime.dateConstructor = createDateConstructor(runtime);
 
   // RegExp constructor
   createRegExpConstructor(runtime);
 
   // Array constructor.
-  createArrayConstructor(runtime);
+  runtime.arrayConstructor = createArrayConstructor(runtime);
 
   if (runtime.hasArrayBuffer()) {
     // ArrayBuffer constructor.
-    createArrayBufferConstructor(runtime);
+    runtime.arrayBufferConstructor = createArrayBufferConstructor(runtime);
 
     // DataView constructor.
-    createDataViewConstructor(runtime);
+    runtime.dataViewConstructor = createDataViewConstructor(runtime);
 
     // TypedArrayBase constructor.
     runtime.typedArrayBaseConstructor =
@@ -583,21 +579,21 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   } // hasArrayBuffer
 
   // Set constructor.
-  createSetConstructor(runtime);
+  runtime.setConstructor = createSetConstructor(runtime);
 
   // Map constructor.
-  createMapConstructor(runtime);
+  runtime.mapConstructor = createMapConstructor(runtime);
 
   // WeakMap constructor.
-  createWeakMapConstructor(runtime);
+  runtime.weakMapConstructor = createWeakMapConstructor(runtime);
 
   // WeakSet constructor.
-  createWeakSetConstructor(runtime);
+  runtime.weakSetConstructor = createWeakSetConstructor(runtime);
 
   // Only define WeakRef constructor if microtasks are being used.
   if (LLVM_UNLIKELY(runtime.hasMicrotaskQueue())) {
     // WeakRef constructor.
-    createWeakRefConstructor(runtime);
+    runtime.weakRefConstructor = createWeakRefConstructor(runtime);
   }
 
   // Symbol constructor.
@@ -616,13 +612,14 @@ void initGlobalObject(Runtime &runtime, const JSLibFlags &jsLibFlags) {
   populateRegExpStringIteratorPrototype(runtime);
 
   // GeneratorFunction constructor (not directly exposed in the global object).
-  createGeneratorFunctionConstructor(runtime);
+  runtime.generatorFunctionConstructor =
+      createGeneratorFunctionConstructor(runtime);
 
   // AsyncFunction constructor (not directly exposed in the global object).
-  createAsyncFunctionConstructor(runtime);
+  runtime.asyncFunctionConstructor = createAsyncFunctionConstructor(runtime);
 
   // TextEncoder constructor.
-  createTextEncoderConstructor(runtime);
+  runtime.textEncoderConstructor = createTextEncoderConstructor(runtime);
 
   // %GeneratorPrototype%.
   populateGeneratorPrototype(runtime);

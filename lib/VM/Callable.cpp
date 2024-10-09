@@ -10,6 +10,7 @@
 #include "hermes/BCGen/FunctionInfo.h"
 #include "hermes/VM/ArrayLike.h"
 #include "hermes/VM/BuildMetadata.h"
+#include "hermes/VM/JSCallableProxy.h"
 #include "hermes/VM/JSDataView.h"
 #include "hermes/VM/JSDate.h"
 #include "hermes/VM/JSError.h"
@@ -108,13 +109,6 @@ std::string Callable::_snapshotNameImpl(GCCell *cell, GC &gc) {
   return self->getNameIfExists(gc.getPointerBase());
 }
 #endif
-
-CallResult<PseudoHandle<JSObject>> Callable::_newObjectImpl(
-    Handle<Callable> /*selfHandle*/,
-    Runtime &runtime,
-    Handle<JSObject> parentHandle) {
-  return JSObject::create(runtime, parentHandle);
-}
 
 void Callable::defineLazyProperties(Handle<Callable> fn, Runtime &runtime) {
   // lazy functions can be Bound or JS Functions.
@@ -439,51 +433,96 @@ CallResult<PseudoHandle<>> Callable::executeCall(
 CallResult<PseudoHandle<>> Callable::executeConstruct0(
     Handle<Callable> selfHandle,
     Runtime &runtime) {
-  auto thisVal = Callable::createThisForConstruct_RJS(selfHandle, runtime);
-  if (LLVM_UNLIKELY(thisVal == ExecutionStatus::EXCEPTION)) {
+  CallResult<PseudoHandle<HermesValue>> thisArgRes =
+      Callable::createThisForConstruct_RJS(selfHandle, runtime, selfHandle);
+  if (LLVM_UNLIKELY(thisArgRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto thisValHandle = runtime.makeHandle<JSObject>(std::move(thisVal->get()));
-  auto result = executeCall0(selfHandle, runtime, thisValHandle, true);
+  struct : public Locals {
+    PinnedValue<> thisArg;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.thisArg = std::move(*thisArgRes);
+  auto result = executeCall0(selfHandle, runtime, lv.thisArg, true);
   if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   return (*result)->isObject() ? std::move(result)
                                : CallResult<PseudoHandle<>>(createPseudoHandle(
-                                     thisValHandle.getHermesValue()));
+                                     lv.thisArg.getHermesValue()));
 }
 
 CallResult<PseudoHandle<>> Callable::executeConstruct1(
     Handle<Callable> selfHandle,
     Runtime &runtime,
     Handle<> param1) {
-  auto thisVal = Callable::createThisForConstruct_RJS(selfHandle, runtime);
-  if (LLVM_UNLIKELY(thisVal == ExecutionStatus::EXCEPTION)) {
+  CallResult<PseudoHandle<>> thisArgRes =
+      Callable::createThisForConstruct_RJS(selfHandle, runtime, selfHandle);
+  if (LLVM_UNLIKELY(thisArgRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  auto thisValHandle = runtime.makeHandle<JSObject>(std::move(thisVal->get()));
+  struct : public Locals {
+    PinnedValue<> thisArg;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.thisArg = std::move(*thisArgRes);
   CallResult<PseudoHandle<>> result =
-      executeCall1(selfHandle, runtime, thisValHandle, *param1, true);
+      executeCall1(selfHandle, runtime, lv.thisArg, *param1, true);
   if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   return (*result)->isObject() ? std::move(result)
                                : CallResult<PseudoHandle<>>(createPseudoHandle(
-                                     thisValHandle.getHermesValue()));
+                                     lv.thisArg.getHermesValue()));
 }
 
-CallResult<PseudoHandle<JSObject>> Callable::createThisForConstruct_RJS(
-    Handle<Callable> selfHandle,
-    Runtime &runtime) {
-  CallResult<PseudoHandle<>> prototypeProp = JSObject::getNamed_RJS(
-      selfHandle, runtime, Predefined::getSymbolID(Predefined::prototype));
-  if (LLVM_UNLIKELY(prototypeProp == ExecutionStatus::EXCEPTION)) {
+CallResult<PseudoHandle<>> Callable::createThisForConstruct_RJS(
+    Handle<> callee,
+    Runtime &runtime,
+    Handle<> newTarget) {
+  if (LLVM_UNLIKELY(!isConstructor(runtime, *callee))) {
+    return runtime.raiseTypeError(
+        "This function cannot be used as a constructor.");
+  }
+  // Don't verify newTarget if it's the same as callee.
+  if (callee->getRaw() != newTarget->getRaw()) {
+    if (LLVM_UNLIKELY(!isConstructor(runtime, *newTarget))) {
+      return runtime.raiseTypeError(
+          "new.target cannot be used as a constructor.");
+    }
+  }
+
+  // Advance past bound functions to see what we will actually be invoking.
+  auto *calleeTargetFunc = vmcast<Callable>(*callee);
+  auto *newTargetPtr = vmcast<Callable>(*newTarget);
+  while (auto *bound = dyn_vmcast<BoundFunction>(calleeTargetFunc)) {
+    NoAllocScope scope(runtime);
+    calleeTargetFunc = bound->getTarget(runtime);
+    // From ES15 10.4.1.2 [[Construct]] Step 5: If SameValue(F, newTarget) is
+    // true, set newTarget to target.
+    if (bound == newTargetPtr) {
+      newTargetPtr = calleeTargetFunc;
+    }
+  }
+
+  // Callables that make their own this should be given undefined in a construct
+  // call.
+  if (Callable::makesOwnThis(calleeTargetFunc)) {
+    return createPseudoHandle(HermesValue::encodeUndefinedValue());
+  }
+
+  struct : public Locals {
+    PinnedValue<Callable> newTarget;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.newTarget = newTargetPtr;
+
+  auto thisArgRes = ordinaryCreateFromConstructor_RJS(
+      runtime, lv.newTarget, runtime.objectPrototype);
+  if (LLVM_UNLIKELY(thisArgRes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
-  Handle<JSObject> prototype = vmisa<JSObject>(prototypeProp->get())
-      ? runtime.makeHandle<JSObject>(prototypeProp->get())
-      : Handle<JSObject>::vmcast(&runtime.objectPrototype);
-  return Callable::newObject(selfHandle, runtime, prototype);
+  return createPseudoHandle(thisArgRes->getHermesValue());
 }
 
 CallResult<double> Callable::extractOwnLengthProperty_RJS(
@@ -569,7 +608,6 @@ const CallableVTable BoundFunction::vt{
         BoundFunction::_deleteOwnIndexedImpl,
         BoundFunction::_checkAllOwnIndexedImpl,
     },
-    BoundFunction::_newObjectImpl_RJS,
     BoundFunction::_callImpl};
 
 void BoundFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
@@ -701,38 +739,6 @@ ExecutionStatus BoundFunction::initializeLengthAndName_RJS(
   return ExecutionStatus::RETURNED;
 }
 
-CallResult<PseudoHandle<JSObject>> BoundFunction::_newObjectImpl_RJS(
-    Handle<Callable> selfHandle,
-    Runtime &runtime,
-    Handle<JSObject>) {
-  auto *self = vmcast<BoundFunction>(*selfHandle);
-
-  // If it is a chain of bound functions, skip directly to the end.
-  while (auto *targetAsBound =
-             dyn_vmcast<BoundFunction>(self->getTarget(runtime)))
-    self = targetAsBound;
-
-  auto targetHandle = runtime.makeHandle(self->getTarget(runtime));
-
-  // We must duplicate the [[Construct]] functionality here.
-
-  // Obtain "target.prototype".
-  auto propRes = JSObject::getNamed_RJS(
-      targetHandle, runtime, Predefined::getSymbolID(Predefined::prototype));
-  if (propRes == ExecutionStatus::EXCEPTION)
-    return ExecutionStatus::EXCEPTION;
-  auto prototype = runtime.makeHandle(std::move(*propRes));
-
-  // If target.prototype is an object, use it, otherwise use the standard
-  // object prototype.
-  return targetHandle->getVT()->newObject(
-      targetHandle,
-      runtime,
-      prototype->isObject()
-          ? Handle<JSObject>::vmcast(prototype)
-          : Handle<JSObject>::vmcast(&runtime.objectPrototype));
-}
-
 CallResult<PseudoHandle<>> BoundFunction::_boundCall(
     BoundFunction *self,
     const Inst *ip,
@@ -746,6 +752,14 @@ CallResult<PseudoHandle<>> BoundFunction::_boundCall(
   StackFramePtr originalCalleeFrame = StackFramePtr(runtime.getStackPointer());
   // Save the original newTarget since we will overwrite it.
   HermesValue originalNewTarget = originalCalleeFrame.getNewTargetRef();
+  Callable *originalNewTargetPtr = originalNewTarget.isUndefined()
+      ? nullptr
+      : vmcast<Callable>(originalNewTarget);
+  // From ES15 10.4.1.2 [[Construct]] Step 5: If SameValue(F, newTarget) is
+  // true, set newTarget to target. Target in this context means the bound
+  // function target. If this boolean is true, then we will set new.target to
+  // target as the spec says.
+  bool forwardNewTarget = false;
   // Save the original arg count since we will lose it.
   auto originalArgCount = originalCalleeFrame.getArgCount();
   // Keep track of the total arg count.
@@ -797,6 +811,14 @@ CallResult<PseudoHandle<>> BoundFunction::_boundCall(
     std::uninitialized_copy_n(
         self->getArgsWithThis(runtime) + 1, boundArgCount, ArgIterator(stack));
 
+    // We need to do this check at each layer of bound functions, since in the
+    // spec, each bound function would be a invoked separately, and each
+    // invocation compares the callee of the construct to the original
+    // new.target.
+    if (self == originalNewTargetPtr) {
+      forwardNewTarget = true;
+    }
+
     // Loop while the target is another bound function.
     auto *targetAsBound = dyn_vmcast<BoundFunction>(self->getTarget(runtime));
     if (!targetAsBound)
@@ -811,6 +833,7 @@ CallResult<PseudoHandle<>> BoundFunction::_boundCall(
     // stack.
     auto *stack = runtime.allocUninitializedStack(
         StackFrameLayout::CallerExtraRegistersAtEnd + 1);
+    auto callee = HermesValue::encodeObjectValue(self->getTarget(runtime));
 
     // Initialize the new frame metadata.
     auto newCalleeFrame = StackFramePtr::initFrame(
@@ -820,8 +843,8 @@ CallResult<PseudoHandle<>> BoundFunction::_boundCall(
         nullptr,
         nullptr,
         totalArgCount,
-        HermesValue::encodeObjectValue(self->getTarget(runtime)),
-        originalNewTarget);
+        callee,
+        forwardNewTarget ? callee : originalNewTarget);
     // Initialize "thisArg". When constructing we must use the original 'this',
     // not the bound one.
     newCalleeFrame.getThisArgRef() = !originalNewTarget.isUndefined()
@@ -869,12 +892,12 @@ CallResult<PseudoHandle<>> BoundFunction::_callImpl(
 }
 
 //===----------------------------------------------------------------------===//
-// class SHLegacyFunction
+// class NativeJSFunction
 
 const CallableVTable NativeJSFunction::vt{
     {
         VTable(
-            CellKind::SHLegacyFunctionKind,
+            CellKind::NativeJSFunctionKind,
             cellSize<NativeJSFunction>(),
             nullptr,
             nullptr,
@@ -897,10 +920,9 @@ const CallableVTable NativeJSFunction::vt{
         NativeJSFunction::_deleteOwnIndexedImpl,
         NativeJSFunction::_checkAllOwnIndexedImpl,
     },
-    NativeJSFunction::_newObjectImpl,
     NativeJSFunction::_callImpl};
 
-void SHLegacyFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
+void NativeJSFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
   mb.addJSObjectOverlapSlots(JSObject::numOverlapSlots<NativeJSFunction>());
   CallableBuildMeta(cell, mb);
   mb.setVTable(&NativeJSFunction::vt);
@@ -908,7 +930,7 @@ void SHLegacyFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
 
 #ifdef HERMES_MEMORY_INSTRUMENTATION
 std::string NativeJSFunction::_snapshotNameImpl(GCCell *cell, GC &gc) {
-  return "SHLegacyFunction";
+  return "NativeJSFunction";
 }
 #endif
 
@@ -1047,7 +1069,6 @@ const CallableVTable NativeFunction::vt{
         NativeFunction::_deleteOwnIndexedImpl,
         NativeFunction::_checkAllOwnIndexedImpl,
     },
-    NativeFunction::_newObjectImpl,
     NativeFunction::_callImpl};
 
 void NativeFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
@@ -1141,14 +1162,6 @@ CallResult<PseudoHandle<>> NativeFunction::_callImpl(
   return _nativeCall(vmcast<NativeFunction>(selfHandle.get()), runtime);
 }
 
-CallResult<PseudoHandle<JSObject>> NativeFunction::_newObjectImpl(
-    Handle<Callable>,
-    Runtime &runtime,
-    Handle<JSObject>) {
-  return runtime.raiseTypeError(
-      "This function cannot be used as a constructor.");
-}
-
 //===----------------------------------------------------------------------===//
 // class NativeConstructor
 
@@ -1188,13 +1201,19 @@ static CallResult<PseudoHandle<JSObject>> toCallResultPseudoHandleJSObject(
   return PseudoHandle<JSObject>{other};
 }
 
-template <class NativeClass>
-CallResult<PseudoHandle<JSObject>> NativeConstructor::creatorFunction(
+CallResult<PseudoHandle<JSObject>> NativeConstructor::parentForNewThis_RJS(
     Runtime &runtime,
-    Handle<JSObject> prototype,
-    void *) {
-  return toCallResultPseudoHandleJSObject(
-      NativeClass::create(runtime, prototype));
+    Handle<Callable> newTarget,
+    Handle<JSObject> nativeCtorProto) {
+  // Slow path, only taken when called via super (or Reflect.construct.)
+  CallResult<PseudoHandle<>> prototypeProp = JSObject::getNamed_RJS(
+      newTarget, runtime, Predefined::getSymbolID(Predefined::prototype));
+  if (LLVM_UNLIKELY(prototypeProp == ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  if (vmisa<JSObject>(prototypeProp->get()))
+    return PseudoHandle<JSObject>::vmcast(std::move(prototypeProp.getValue()));
+  return PseudoHandle<JSObject>{nativeCtorProto};
 }
 
 #define NATIVE_CONSTRUCTOR(fun)                    \
@@ -1229,7 +1248,6 @@ const CallableVTable NativeConstructor::vt{
         NativeConstructor::_deleteOwnIndexedImpl,
         NativeConstructor::_checkAllOwnIndexedImpl,
     },
-    NativeConstructor::_newObjectImpl,
     NativeConstructor::_callImpl};
 
 void NativeConstructorBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
@@ -1242,15 +1260,6 @@ void NativeConstructorBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
 CallResult<PseudoHandle<>> NativeConstructor::_callImpl(
     Handle<Callable> selfHandle,
     Runtime &runtime) {
-  StackFramePtr newFrame{runtime.getStackPointer()};
-
-  if (newFrame.isConstructorCall()) {
-    auto consHandle = Handle<NativeConstructor>::vmcast(selfHandle);
-    assert(
-        consHandle->targetKind_ ==
-            vmcast<JSObject>(newFrame.getThisArgRef())->getKind() &&
-        "call(construct=true) called without the correct 'this' value");
-  }
   return NativeFunction::_callImpl(selfHandle, runtime);
 }
 #endif
@@ -1284,7 +1293,6 @@ const CallableVTable JSFunction::vt{
         JSFunction::_deleteOwnIndexedImpl,
         JSFunction::_checkAllOwnIndexedImpl,
     },
-    JSFunction::_newObjectImpl,
     JSFunction::_callImpl};
 
 void JSFunctionBuildMeta(const GCCell *cell, Metadata::Builder &mb) {

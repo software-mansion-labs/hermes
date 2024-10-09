@@ -297,8 +297,8 @@ static CallResult<PseudoHandle<StringPrimitive>> numberToString(
   char buf8[hermes::NUMBER_TO_STRING_BUF_SIZE];
 
   // Optimization: Fast-case for positive integers < 2^31
-  int32_t n = unsafeTruncateDouble<int32_t>(m);
-  if (m == static_cast<double>(n) && n > 0) {
+  int32_t n;
+  if (sh_tryfast_f64_to_i32(m, n) && n > 0) {
     // Write base 10 digits in reverse from end of buf8.
     char *p = buf8 + sizeof(buf8);
     do {
@@ -1774,11 +1774,11 @@ CallResult<Handle<Callable>> speciesConstructor(
   return defaultConstructor;
 }
 
-CallResult<bool> isConstructor(Runtime &runtime, HermesValue value) {
+bool isConstructor(Runtime &runtime, HermesValue value) {
   return isConstructor(runtime, dyn_vmcast<Callable>(value));
 }
 
-CallResult<bool> isConstructor(Runtime &runtime, Callable *callable) {
+bool isConstructor(Runtime &runtime, Callable *callable) {
   // This is not a complete definition, since ES6 and later define member
   // functions of objects to not be constructors; however, Hermes does not have
   // ES6 classes implemented yet, so we cannot check for that case.
@@ -1786,19 +1786,25 @@ CallResult<bool> isConstructor(Runtime &runtime, Callable *callable) {
     return false;
   }
 
-  // We traverse the BoundFunction target chain to find the eventual target.
-  while (BoundFunction *b = dyn_vmcast<BoundFunction>(callable)) {
-    callable = b->getTarget(runtime);
+  // Traverse through BoundFunction & JSCallableProxy target chain to find the
+  // eventual target.
+  while (true) {
+    if (auto *proxy = dyn_vmcast<JSCallableProxy>(callable)) {
+      callable = proxy->getTarget(runtime);
+      if (!callable) {
+        return false;
+      }
+      continue;
+    }
+    if (auto *bound = dyn_vmcast<BoundFunction>(callable)) {
+      callable = bound->getTarget(runtime);
+      continue;
+    }
+    break;
   }
 
   // If it is a bytecode function, check the flags.
   if (auto *func = dyn_vmcast<JSFunction>(callable)) {
-    auto *cb = func->getCodeBlock();
-    // Even though it doesn't make sense logically, we need to compile the
-    // function in order to access it flags.
-    if (LLVM_UNLIKELY(cb->lazyCompile(runtime) == ExecutionStatus::EXCEPTION)) {
-      return ExecutionStatus::EXCEPTION;
-    }
     return !func->getCodeBlock()->getHeaderFlags().isCallProhibited(true);
   }
   if (auto *nativeFunc = dyn_vmcast<NativeJSFunction>(callable)) {
@@ -1812,13 +1818,31 @@ CallResult<bool> isConstructor(Runtime &runtime, Callable *callable) {
     return true;
   }
 
-  // JSCallableProxy is a NativeFunction, but may or may not be a
-  // constructor, so we ask it.
-  if (auto *cproxy = dyn_vmcast<JSCallableProxy>(callable)) {
-    return cproxy->isConstructor(runtime);
-  }
-
   return false;
+}
+
+CallResult<PseudoHandle<JSObject>> ordinaryCreateFromConstructor_RJS(
+    Runtime &runtime,
+    Handle<Callable> constructor,
+    Handle<JSObject> intrinsicDefaultProto) {
+  struct : public Locals {
+    PinnedValue<> proto;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  // 2. Let proto be ? Get(constructor, "prototype").
+  auto protoRes = JSObject::getNamed_RJS(
+      constructor, runtime, Predefined::getSymbolID(Predefined::prototype));
+  if (LLVM_UNLIKELY(protoRes == ExecutionStatus::EXCEPTION))
+    return ExecutionStatus::EXCEPTION;
+  lv.proto = std::move(*protoRes);
+
+  // 3. If proto is not an Object, then
+  // b. Set proto to realm's intrinsic object named intrinsicDefaultProto.
+  // 4. Return proto.
+  return JSObject::create(
+      runtime,
+      LLVM_LIKELY(lv.proto->isObject()) ? Handle<JSObject>::vmcast(&lv.proto)
+                                        : intrinsicDefaultProto);
 }
 
 CallResult<bool>

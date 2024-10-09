@@ -9,26 +9,35 @@
 #error "RUNTIME_HV_FIELD must be defined"
 #endif
 
+RUNTIME_HV_FIELD(objectConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(objectPrototype, JSObject)
-RUNTIME_HV_FIELD(errorConstructor, NativeConstructor)
 
-/// JSError.prototype, and prototype of all native error types.
-#define ALL_ERROR_TYPE(name) RUNTIME_HV_FIELD(name##Prototype, JSObject)
+/// All error constructors and prototypes.
+#define ALL_ERROR_TYPE(name)                           \
+RUNTIME_HV_FIELD(name##Constructor, NativeConstructor) \
+RUNTIME_HV_FIELD(name##Prototype, JSObject)
 #include "hermes/VM/NativeErrorTypes.def"
 #undef ALL_ERROR_TYPE
 RUNTIME_HV_FIELD(functionPrototype, NativeFunction)
 RUNTIME_HV_FIELD(functionConstructor, NativeConstructor)
 
+RUNTIME_HV_FIELD(stringConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(stringPrototype, JSString)
 RUNTIME_HV_FIELD(bigintPrototype, JSObject)
+RUNTIME_HV_FIELD(numberConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(numberPrototype, JSNumber)
+RUNTIME_HV_FIELD(booleanConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(booleanPrototype, JSBoolean)
 RUNTIME_HV_FIELD(symbolPrototype, JSObject)
+RUNTIME_HV_FIELD(dateConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(datePrototype, JSObject)
+RUNTIME_HV_FIELD(arrayConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(arrayPrototype, JSArray)
 RUNTIME_HV_FIELD(fastArrayPrototype, JSObject)
 
+RUNTIME_HV_FIELD(arrayBufferConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(arrayBufferPrototype, JSObject)
+RUNTIME_HV_FIELD(dataViewConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(dataViewPrototype, JSObject)
 RUNTIME_HV_FIELD(typedArrayBasePrototype, JSObject)
 
@@ -39,16 +48,21 @@ RUNTIME_HV_FIELD(typedArrayBasePrototype, JSObject)
 #include "hermes/VM/TypedArrays.def"
 #undef TYPED_ARRAY
 
+RUNTIME_HV_FIELD(setConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(setPrototype, JSObject)
 RUNTIME_HV_FIELD(setPrototypeAdd, NativeFunction)
 RUNTIME_HV_FIELD(setPrototypeValues, NativeFunction)
 RUNTIME_HV_FIELD(setIteratorPrototype, JSObject)
+RUNTIME_HV_FIELD(mapConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(mapPrototype, JSObject)
 RUNTIME_HV_FIELD(mapPrototypeSet, NativeFunction)
 RUNTIME_HV_FIELD(mapPrototypeEntries, NativeFunction)
 RUNTIME_HV_FIELD(mapIteratorPrototype, JSObject)
+RUNTIME_HV_FIELD(weakMapConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(weakMapPrototype, JSObject)
+RUNTIME_HV_FIELD(weakSetConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(weakSetPrototype, JSObject)
+RUNTIME_HV_FIELD(weakRefConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(weakRefPrototype, JSObject)
 RUNTIME_HV_FIELD(regExpPrototype, JSObject)
 RUNTIME_HV_FIELD(typedArrayBaseConstructor, NativeConstructor)
@@ -64,16 +78,19 @@ RUNTIME_HV_FIELD(regExpMatchClass, HiddenClass)
 RUNTIME_HV_FIELD(iteratorPrototype, JSObject)
 RUNTIME_HV_FIELD(arrayIteratorPrototype, JSObject)
 RUNTIME_HV_FIELD(arrayPrototypeValues, NativeFunction)
+RUNTIME_HV_FIELD(asyncFunctionConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(asyncFunctionPrototype, JSObject)
 RUNTIME_HV_FIELD(stringIteratorPrototype, JSObject)
 RUNTIME_HV_FIELD(regExpStringIteratorPrototype, JSObject)
 RUNTIME_HV_FIELD(generatorPrototype, JSObject)
+RUNTIME_HV_FIELD(generatorFunctionConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(generatorFunctionPrototype, JSObject)
 RUNTIME_HV_FIELD(parseIntFunction, NativeFunction)
 RUNTIME_HV_FIELD(parseFloatFunction, NativeFunction)
 RUNTIME_HV_FIELD(requireFunction, NativeFunction)
 RUNTIME_HV_FIELD(jsErrorStackAccessor, PropertyAccessor)
 RUNTIME_HV_FIELD(callSitePrototype, JSObject)
+RUNTIME_HV_FIELD(textEncoderConstructor, NativeConstructor)
 RUNTIME_HV_FIELD(textEncoderPrototype, JSObject)
 RUNTIME_HV_FIELD(functionPrototypeSymbolHasInstance, NativeFunction)
 

@@ -132,14 +132,6 @@ class Environment final
 };
 
 struct CallableVTable : public ObjectVTable {
-  /// Create a new object instance to be passed as the 'this' argument when
-  /// invoking the constructor. Overriding this method allows creation of
-  /// different underlying native objects.
-  CallResult<PseudoHandle<JSObject>> (*newObject)(
-      Handle<Callable> selfHandle,
-      Runtime &runtime,
-      Handle<JSObject> parentHandle);
-
   /// Call the callable with arguments already on the stack.
   CallResult<PseudoHandle<>> (
       *call)(Handle<Callable> selfHandle, Runtime &runtime);
@@ -266,14 +258,6 @@ class Callable : public JSObject {
       Handle<> thisArgument,
       Handle<JSObject> arrayLike);
 
-  /// Calls CallableVTable::newObject.
-  static CallResult<PseudoHandle<JSObject>> newObject(
-      Handle<Callable> selfHandle,
-      Runtime &runtime,
-      Handle<JSObject> parentHandle) {
-    return selfHandle->getVT()->newObject(selfHandle, runtime, parentHandle);
-  }
-
   /// Calls CallableVTable::call.
   static CallResult<PseudoHandle<>> call(
       Handle<Callable> selfHandle,
@@ -327,15 +311,26 @@ class Callable : public JSObject {
   /// creation has been delayed by lazy objects.
   static void defineLazyProperties(Handle<Callable> fn, Runtime &runtime);
 
-  /// Create an object by calling newObject on \p selfHandle.
-  /// The object can then be used as the "this" argument when calling
-  /// \p selfHandle to construct an object.
-  /// Retrieves the "prototype" property from \p selfHandle,
-  /// and calls newObject() on it if it's an object,
-  /// else calls newObject() on the built-in Object prototype object.
-  static CallResult<PseudoHandle<JSObject>> createThisForConstruct_RJS(
-      Handle<Callable> selfHandle,
-      Runtime &runtime);
+  /// \return the `this` to be used for a construct call on \p callee, with \p
+  /// newTarget as the new.target. We need take special care when \p callee is a
+  /// NativeConstructor, ES6 function, or JSCallableProxy. In these cases, those
+  /// functions will create their own `this`, so this function will \return
+  /// undefined.
+  /// \param callee the function to be called as constructor.
+  /// \param newTarget is the new.target of the construct call.
+  static CallResult<PseudoHandle<>> createThisForConstruct_RJS(
+      Handle<> callee,
+      Runtime &runtime,
+      Handle<> newTarget);
+
+  /// \return true if \p F is responsible for making its own `this` parameter
+  /// when called as a constructor.
+  static inline bool makesOwnThis(Callable *F) {
+    return kindInRange(
+        F->getKind(),
+        CellKind::CallableMakesThisKind_first,
+        CellKind::CallableMakesThisKind_last);
+  }
 
  protected:
   Callable(
@@ -351,13 +346,6 @@ class Callable : public JSObject {
 #ifdef HERMES_MEMORY_INSTRUMENTATION
   static std::string _snapshotNameImpl(GCCell *cell, GC &gc);
 #endif
-
-  /// Create a an instance of Object to be passed as the 'this' argument when
-  /// invoking the constructor.
-  static CallResult<PseudoHandle<JSObject>> _newObjectImpl(
-      Handle<Callable> selfHandle,
-      Runtime &runtime,
-      Handle<JSObject> parentHandle);
 };
 
 void Callable::staticAsserts() {
@@ -461,12 +449,6 @@ class BoundFunction final : public Callable {
     return argStorage_.getNonNull(runtime)->begin();
   }
 
-  /// Create an instance of the object using the bound constructor.
-  static CallResult<PseudoHandle<JSObject>> _newObjectImpl_RJS(
-      Handle<Callable> selfHandle,
-      Runtime &runtime,
-      Handle<JSObject> parentHandle);
-
   /// Call the callable with arguments already on the stack.
   static CallResult<PseudoHandle<>> _callImpl(
       Handle<Callable> selfHandle,
@@ -496,10 +478,10 @@ class NativeJSFunction : public Callable {
   static const CallableVTable vt;
 
   static constexpr CellKind getCellKind() {
-    return CellKind::SHLegacyFunctionKind;
+    return CellKind::NativeJSFunctionKind;
   }
   static bool classof(const GCCell *cell) {
-    return cell->getKind() == CellKind::SHLegacyFunctionKind;
+    return cell->getKind() == CellKind::NativeJSFunctionKind;
   }
 
   NativeJSFunctionPtr getFunctionPtr() const {
@@ -542,7 +524,7 @@ class NativeJSFunction : public Callable {
     return self->functionPtr_(shr);
   }
 
-  /// Create an instance of SHLegacyFunction.
+  /// Create an instance of NativeJSFunction.
   /// \param parentHandle object to use as [[Prototype]].
   /// \param context the context to be passed to the function
   /// \param functionPtr the native function
@@ -557,7 +539,7 @@ class NativeJSFunction : public Callable {
       const SHUnit *unit,
       unsigned additionalSlotCount = 0);
 
-  /// Create an instance of SHLegacyFunction.
+  /// Create an instance of NativeJSFunction.
   /// \param parentHandle object to use as [[Prototype]].
   /// \param parentEnvHandle the parent environment
   /// \param context the context to be passed to the function
@@ -905,37 +887,12 @@ class NativeFunction : public Callable {
   static CallResult<PseudoHandle<>> _callImpl(
       Handle<Callable> selfHandle,
       Runtime &runtime);
-
-  /// We have to override this method because NativeFunction should not be
-  /// used as constructor.
-  /// Note: this may change in the future, in that case, we should create
-  /// a subclass of NativeFunction for this restriction.
-  static CallResult<PseudoHandle<JSObject>>
-  _newObjectImpl(Handle<Callable>, Runtime &runtime, Handle<JSObject>);
 };
 
 /// A NativeFunction to be used as a constructor for native objects other than
 /// Object.
 class NativeConstructor final : public NativeFunction {
  public:
-  /// A CreatorFunction is responsible for creating the 'this' object that the
-  /// constructor function sees.
-  /// \p proto is the '.prototype' property of the constructor and should be set
-  /// as the __proto__ for the nascent object.
-  /// \p context is the context pointer provided to the NativeConstructor.
-  using CreatorFunction = CallResult<PseudoHandle<JSObject>>(
-      Runtime &,
-      Handle<JSObject> proto,
-      void *context);
-
-  /// Unifies signatures of various GCCells so that they may be stored
-  /// in the NativeConstructor.
-  /// Delegates to toCallResultPseudoHandleJSObject to convert various
-  /// types to CallResult<PseudoHandle<JSObject>>.
-  template <class NativeClass>
-  static CallResult<PseudoHandle<JSObject>>
-  creatorFunction(Runtime &runtime, Handle<JSObject> prototype, void *context);
-
   static const CallableVTable vt;
 
   static constexpr CellKind getCellKind() {
@@ -951,7 +908,6 @@ class NativeConstructor final : public NativeFunction {
   /// \param context the context pointer to be passed to the native function
   /// \param functionPtr the native function
   /// \param paramCount number of parameters (excluding `this`)
-  /// \param creator the function invoked to create the proposed 'this' object
   /// passed to the constructor
   /// \param targetKind the expected CellKind of objects produced by the
   /// constructor
@@ -960,18 +916,14 @@ class NativeConstructor final : public NativeFunction {
       Handle<JSObject> parentHandle,
       void *context,
       NativeFunctionPtr functionPtr,
-      unsigned paramCount,
-      CreatorFunction *creator,
-      CellKind targetKind) {
+      unsigned paramCount) {
     auto *cell = runtime.makeAFixed<NativeConstructor>(
         runtime,
         parentHandle,
         runtime.getHiddenClassForPrototype(
             *parentHandle, numOverlapSlots<NativeConstructor>()),
         context,
-        functionPtr,
-        creator,
-        targetKind);
+        functionPtr);
     return JSObjectInit::initToPseudoHandle(runtime, cell);
   }
 
@@ -985,9 +937,7 @@ class NativeConstructor final : public NativeFunction {
       Handle<JSObject> parentHandle,
       Handle<Environment> parentEnvHandle,
       void *context,
-      NativeFunctionPtr functionPtr,
-      CreatorFunction *creator,
-      CellKind targetKind) {
+      NativeFunctionPtr functionPtr) {
     auto *cell = runtime.makeAFixed<NativeConstructor>(
         runtime,
         parentHandle,
@@ -995,37 +945,31 @@ class NativeConstructor final : public NativeFunction {
             *parentHandle, numOverlapSlots<NativeConstructor>()),
         parentEnvHandle,
         context,
-        functionPtr,
-        creator,
-        targetKind);
+        functionPtr);
     return JSObjectInit::initToPseudoHandle(runtime, cell);
   }
 
+  /// Obtain the correct parent for the `this` to be created for the current
+  /// constructor call. First, fetch the .prototype of new.target. If it's an
+  /// object, that is used as the parent. If not, then we use \p
+  /// nativeCtorProto.
+  /// \param newTarget is the new.target of the current construct call.
+  /// \param nativeCtorProto is the .prototype of the native constructor that
+  /// was called as a constructor.
+  static CallResult<PseudoHandle<JSObject>> parentForNewThis_RJS(
+      Runtime &runtime,
+      Handle<Callable> newTarget,
+      Handle<JSObject> nativeCtorProto);
+
  private:
-#ifndef NDEBUG
-  /// Kind of the object returned by this native constructor.
-  const CellKind targetKind_;
-#endif
-
-  /// Function used to create new object from this constructor.
-  /// Typically passed by invoking NativeConstructor::creatorFunction<T>.
-  CreatorFunction *const creator_;
-
  public:
   NativeConstructor(
       Runtime &runtime,
       Handle<JSObject> parent,
       Handle<HiddenClass> clazz,
       void *context,
-      NativeFunctionPtr functionPtr,
-      CreatorFunction *creator,
-      CellKind targetKind)
-      : NativeFunction(runtime, parent, clazz, context, functionPtr),
-#ifndef NDEBUG
-        targetKind_(targetKind),
-#endif
-        creator_(creator) {
-  }
+      NativeFunctionPtr functionPtr)
+      : NativeFunction(runtime, parent, clazz, context, functionPtr) {}
 
   NativeConstructor(
       Runtime &runtime,
@@ -1033,34 +977,16 @@ class NativeConstructor final : public NativeFunction {
       Handle<HiddenClass> clazz,
       Handle<Environment> parentEnvHandle,
       void *context,
-      NativeFunctionPtr functionPtr,
-      CreatorFunction *creator,
-      CellKind targetKind)
+      NativeFunctionPtr functionPtr)
       : NativeFunction(
             runtime,
             parent,
             clazz,
             parentEnvHandle,
             context,
-            functionPtr),
-#ifndef NDEBUG
-        targetKind_(targetKind),
-#endif
-        creator_(creator) {
-  }
+            functionPtr) {}
 
  private:
-  /// Create a an instance of an object from \c creator_ to be passed as the
-  /// 'this' argument when invoking the constructor.
-  static CallResult<PseudoHandle<JSObject>> _newObjectImpl(
-      Handle<Callable> selfHandle,
-      Runtime &runtime,
-      Handle<JSObject> parentHandle) {
-    auto nativeConsHandle = Handle<NativeConstructor>::vmcast(selfHandle);
-    return nativeConsHandle->creator_(
-        runtime, parentHandle, nativeConsHandle->getContext());
-  }
-
 #ifndef NDEBUG
   /// If construct=true, check that the constructor was called with a "this"
   /// of the correct type.

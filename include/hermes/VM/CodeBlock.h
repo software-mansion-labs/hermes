@@ -67,6 +67,11 @@ class CodeBlock final
   uint32_t executionCount_ = 0;
 #endif
 
+#ifdef HERMES_ENABLE_DEBUGGER
+  /// The number of breakpoints currently installed in this function.
+  uint32_t numInstalledBreakpoints_ = 0;
+#endif
+
   /// Total size of the property cache.
   const uint32_t propertyCacheSize_;
 
@@ -357,8 +362,10 @@ class CodeBlock final
   /// Decrements the user count of the associated runtime module.
   void uninstallBreakpointAtOffset(uint32_t offset, uint8_t opCode);
 
-  /// \return the offset of the next instruction after the one at \p offset.
-  uint32_t getNextOffset(uint32_t offset) const;
+  /// \return the number of breakpoints installed in this code block.
+  uint32_t getNumInstalledBreakpoints() const {
+    return numInstalledBreakpoints_;
+  }
 #endif
 };
 

@@ -85,3 +85,26 @@ try {
 Object.defineProperty(foo, "length", {value: {valueOf: function() {throw TypeError("HAHA!");}}});
 print(foo.bind(null).length);
 //CHECK-NEXT: 0
+
+// new.target is set to target function, not bound function.
+function bar() {
+  print(new.target === bar);
+}
+var barBound = bar.bind();
+new barBound();
+//CHECK-NEXT: true
+
+// new.target is setup correctly in nested bound function calls.
+(function (){
+  function a() {
+    print(new.target === a);
+  }
+  var boundA = a.bind();
+  var boundA2 = boundA.bind();
+  let o = Reflect.construct(boundA2, [], boundA);
+//CHECK-NEXT: true
+  print(Object.getPrototypeOf(o).constructor === a);
+//CHECK-NEXT: true
+  new boundA2();
+//CHECK-NEXT: true
+})();

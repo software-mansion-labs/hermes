@@ -284,7 +284,6 @@ class TempRegAlloc {
 };
 
 class Emitter {
- public:
   /// Level of dumping JIT code. Bit 0 indicates code printing on or off.
   unsigned const dumpJitCode_;
 
@@ -385,7 +384,8 @@ class Emitter {
       PropertyCacheEntry *writePropertyCache,
       uint32_t numFrameRegs,
       uint32_t numCount,
-      uint32_t npCount);
+      uint32_t npCount,
+      const std::function<void(std::string &&message)> &longjmpError);
 
   /// Add the jitted function to the JIT runtime and return a pointer to it.
   JITCompiledFunctionPtr addToRuntime(asmjit::JitRuntime &jr);
@@ -402,6 +402,9 @@ class Emitter {
 
   void leave();
   void newBasicBlock(const asmjit::Label &label);
+
+  /// Abort execution.
+  void unreachable();
 
   /// Call a JS function.
   void call(FR frRes, FR frCallee, uint32_t argc);
@@ -717,6 +720,13 @@ class Emitter {
       uint32_t numLiterals,
       uint32_t bufferIndex);
 
+  void newFastArray(FR frRes, uint32_t size);
+  void fastArrayLength(FR frRes, FR arr);
+  void fastArrayLoad(FR frRes, FR arr, FR idx);
+  void fastArrayStore(FR arr, FR idx, FR val);
+  void fastArrayPush(FR arr, FR val);
+  void fastArrayAppend(FR arr, FR other);
+
   void getGlobalObject(FR frRes);
   void declareGlobalVar(SHSymbolID symID);
   void createTopLevelEnvironment(FR frRes, uint32_t size);
@@ -756,7 +766,7 @@ class Emitter {
 
   void getArgumentsLength(FR frRes, FR frLazyReg);
 
-  void createThis(FR frRes, FR frPrototype, FR frCallable);
+  void createThis(FR frRes, FR frCallee, FR frNewTarget, uint8_t cacheIdx);
   void selectObject(FR frRes, FR frThis, FR frConstructed);
 
   void loadThisNS(FR frRes);

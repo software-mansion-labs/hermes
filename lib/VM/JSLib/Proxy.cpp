@@ -89,11 +89,16 @@ proxyConstructor(void *, Runtime &runtime, NativeArgs args) {
         "Proxy() called in function context instead of constructor");
   }
   // 2. Return ? ProxyCreate(target, handler).
+  struct : public Locals {
+    PinnedValue<JSProxy> self;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  lv.self = JSProxy::create(runtime);
   auto proxyRes = proxyCreate(
       runtime,
       args.dyncastArg<JSObject>(0),
       args.dyncastArg<JSObject>(1),
-      args.vmcastThis<JSProxy>());
+      lv.self);
   if (proxyRes == ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
@@ -171,13 +176,12 @@ proxyRevocable(void *, Runtime &runtime, NativeArgs args) {
 }
 
 Handle<NativeConstructor> createProxyConstructor(Runtime &runtime) {
-  Handle<NativeConstructor> cons = defineSystemConstructor<JSProxy>(
+  Handle<NativeConstructor> cons = defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::Proxy),
       proxyConstructor,
       runtime.makeNullHandle<JSObject>(),
-      2,
-      CellKind::JSProxyKind);
+      2);
 
   defineMethod(
       runtime,

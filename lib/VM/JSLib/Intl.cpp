@@ -445,6 +445,7 @@ CallResult<HermesValue> intlServiceConstructor(
     Runtime &runtime,
     NativeArgs args,
     llvh::ArrayRef<OptionData> optionData,
+    Handle<NativeConstructor> serviceConstructor,
     Handle<JSObject> servicePrototype,
     unsigned int additionalSlots) {
   CallResult<std::vector<std::u16string>> localesRes =
@@ -473,32 +474,42 @@ CallResult<HermesValue> intlServiceConstructor(
   }
   std::unique_ptr<T> native = std::move(*nativeRes);
 
-  auto typeHandle = runtime.makeHandle(
-      HermesValue::encodeTrustedNumberValue((uint32_t)T::getNativeType()));
-  auto setType = [&](Handle<DecoratedObject> obj) {
-    auto res = JSObject::defineNewOwnProperty(
-        obj,
-        runtime,
-        Predefined::getSymbolID(Predefined::InternalPropertyIntlNativeType),
-        PropertyFlags::defaultNewNamedPropertyFlags(),
-        typeHandle);
-    (void)res;
-    assert(res != ExecutionStatus::EXCEPTION && "Setting type cannot fail.");
-  };
-
-  // If constructor, use the allocated object
-  if (args.isConstructorCall()) {
-    Handle<DecoratedObject> selfHandle = args.vmcastThis<DecoratedObject>();
-    selfHandle->setDecoration(std::move(native));
-    setType(selfHandle);
-    return HermesValue::encodeUndefinedValue();
+  struct : public Locals {
+    PinnedValue<JSObject> selfParent;
+    PinnedValue<DecoratedObject> self;
+    PinnedValue<HermesValue> typeVal;
+  } lv;
+  LocalsRAII lraii(runtime, &lv);
+  if (LLVM_LIKELY(
+          !args.isConstructorCall() ||
+          (args.getNewTarget().getRaw() ==
+           serviceConstructor.getHermesValue().getRaw()))) {
+    lv.selfParent = servicePrototype;
+  } else {
+    CallResult<PseudoHandle<JSObject>> thisParentRes =
+        NativeConstructor::parentForNewThis_RJS(
+            runtime,
+            Handle<Callable>::vmcast(&args.getNewTarget()),
+            servicePrototype);
+    if (LLVM_UNLIKELY(thisParentRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    lv.selfParent = std::move(*thisParentRes);
   }
+  lv.self = DecoratedObject::create(
+      runtime, servicePrototype, std::move(native), additionalSlots);
 
-  // Otherwise allocate a new one.
-  auto newHandle = runtime.makeHandle(DecoratedObject::create(
-      runtime, servicePrototype, std::move(native), additionalSlots));
-  setType(newHandle);
-  return newHandle.getHermesValue();
+  lv.typeVal =
+      HermesValue::encodeTrustedNumberValue((uint32_t)T::getNativeType());
+  auto res = JSObject::defineNewOwnProperty(
+      lv.self,
+      runtime,
+      Predefined::getSymbolID(Predefined::InternalPropertyIntlNativeType),
+      PropertyFlags::defaultNewNamedPropertyFlags(),
+      lv.typeVal);
+  (void)res;
+  assert(res != ExecutionStatus::EXCEPTION && "Setting type cannot fail.");
+  return lv.self.getHermesValue();
 }
 
 // T is a class from platform_intl which has an appropriate
@@ -608,17 +619,6 @@ void setCollator(
       SmallHermesValue::encodeObjectValue(value.get(), runtime));
 }
 
-CallResult<PseudoHandle<JSObject>>
-intlCollatorCreator(Runtime &runtime, Handle<JSObject> parentHandle, void *) {
-  return createPseudoHandle<JSObject>(
-      DecoratedObject::create(
-          runtime,
-          parentHandle,
-          nullptr,
-          static_cast<unsigned int>(CollatorSlotIndexes::COUNT))
-          .get());
-}
-
 void defineIntlCollator(Runtime &runtime, Handle<JSObject> intl) {
   // Create %CollatorPrototype% intrinsic.  Properties will be added later.
   runtime.intlCollatorPrototype = JSObject::create(runtime);
@@ -630,9 +630,7 @@ void defineIntlCollator(Runtime &runtime, Handle<JSObject> intl) {
       Predefined::getSymbolID(Predefined::Collator),
       intlCollatorConstructor,
       prototype,
-      0,
-      intlCollatorCreator,
-      CellKind::DecoratedObjectKind);
+      0);
   runtime.intlCollator = constructor;
 
   {
@@ -711,6 +709,7 @@ intlCollatorConstructor(void *, Runtime &runtime, NativeArgs args) {
       runtime,
       args,
       kCollatorOptions,
+      Handle<NativeConstructor>::vmcast(&runtime.intlCollator),
       Handle<JSObject>::vmcast(&runtime.intlCollatorPrototype),
       static_cast<unsigned int>(CollatorSlotIndexes::COUNT));
 }
@@ -845,19 +844,6 @@ void setDateTimeFormat(
       SmallHermesValue::encodeObjectValue(value.get(), runtime));
 }
 
-CallResult<PseudoHandle<JSObject>> intlDateTimeFormatCreator(
-    Runtime &runtime,
-    Handle<JSObject> parentHandle,
-    void *) {
-  return createPseudoHandle<JSObject>(
-      DecoratedObject::create(
-          runtime,
-          parentHandle,
-          nullptr,
-          static_cast<unsigned int>(DTFSlotIndexes::COUNT))
-          .get());
-}
-
 void defineIntlDateTimeFormat(Runtime &runtime, Handle<JSObject> intl) {
   // Create %DateTimeFormatPrototype% intrinsic.  Properties will be added
   // later.
@@ -870,9 +856,7 @@ void defineIntlDateTimeFormat(Runtime &runtime, Handle<JSObject> intl) {
       Predefined::getSymbolID(Predefined::DateTimeFormat),
       intlDateTimeFormatConstructor,
       prototype,
-      0,
-      intlDateTimeFormatCreator,
-      CellKind::DecoratedObjectKind);
+      0);
   runtime.intlDateTimeFormat = constructor;
 
   {
@@ -961,6 +945,7 @@ intlDateTimeFormatConstructor(void *, Runtime &runtime, NativeArgs args) {
       runtime,
       args,
       kDTFOptions,
+      Handle<NativeConstructor>::vmcast(&runtime.intlDateTimeFormat),
       Handle<JSObject>::vmcast(&runtime.intlDateTimeFormatPrototype),
       static_cast<unsigned int>(DTFSlotIndexes::COUNT));
 }
@@ -1161,19 +1146,6 @@ void setNumberFormat(
       SmallHermesValue::encodeObjectValue(value.get(), runtime));
 }
 
-CallResult<PseudoHandle<JSObject>> intlNumberFormatCreator(
-    Runtime &runtime,
-    Handle<JSObject> parentHandle,
-    void *) {
-  return createPseudoHandle<JSObject>(
-      DecoratedObject::create(
-          runtime,
-          parentHandle,
-          nullptr,
-          static_cast<unsigned int>(NFSlotIndexes::COUNT))
-          .get());
-}
-
 void defineIntlNumberFormat(Runtime &runtime, Handle<JSObject> intl) {
   // Create %NumberFormatPrototype% intrinsic.  Properties will be added later.
   runtime.intlNumberFormatPrototype = JSObject::create(runtime);
@@ -1185,9 +1157,7 @@ void defineIntlNumberFormat(Runtime &runtime, Handle<JSObject> intl) {
       Predefined::getSymbolID(Predefined::NumberFormat),
       intlNumberFormatConstructor,
       prototype,
-      0,
-      intlNumberFormatCreator,
-      CellKind::DecoratedObjectKind);
+      0);
   runtime.intlNumberFormat = constructor;
 
   {
@@ -1276,6 +1246,7 @@ intlNumberFormatConstructor(void *, Runtime &runtime, NativeArgs args) {
       runtime,
       args,
       kNumberFormatOptions,
+      Handle<NativeConstructor>::vmcast(&runtime.intlNumberFormat),
       Handle<JSObject>::vmcast(&runtime.intlNumberFormatPrototype),
       static_cast<unsigned int>(NFSlotIndexes::COUNT));
 }

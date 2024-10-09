@@ -155,13 +155,12 @@ Handle<NativeConstructor> createArrayConstructor(Runtime &runtime) {
       dpf,
       runtime.arrayPrototypeValues));
 
-  auto cons = defineSystemConstructor<JSArray>(
+  auto cons = defineSystemConstructor(
       runtime,
       Predefined::getSymbolID(Predefined::Array),
       arrayConstructor,
       arrayPrototype,
-      1,
-      CellKind::JSArrayKind);
+      1);
 
   defineMethod(
       runtime,
@@ -341,17 +340,38 @@ Handle<NativeConstructor> createArrayConstructor(Runtime &runtime) {
 
 CallResult<HermesValue>
 arrayConstructor(void *, Runtime &runtime, NativeArgs args) {
-  struct : Locals {
+  // NativeConstructors create their own this when called with new. The array
+  // constructor also creates a new JSArray when it's called normally. So, we
+  // will always create a new JSArray when called.
+  struct : public Locals {
+    PinnedValue<JSObject> selfParent;
     PinnedValue<JSArray> self;
   } lv;
-  LocalsRAII lraii{runtime, &lv};
-
-  // If constructor, use the allocated object, otherwise allocate a new one.
-  // Everything else is the same after that.
-  if (args.isConstructorCall())
-    lv.self = vmcast<JSArray>(args.getThisArg());
-  else {
-    auto arrRes = JSArray::create(runtime, 0, 0);
+  LocalsRAII lraii(runtime, &lv);
+  // If this is not a construct call, or it is a construct call and new.target
+  // is the array constructor, then we know what parent to use to create the new
+  // JSArray.
+  if (LLVM_LIKELY(
+          !args.isConstructorCall() ||
+          (args.getNewTarget().getRaw() ==
+           runtime.arrayConstructor.getHermesValue().getRaw()))) {
+    CallResult<PseudoHandle<JSArray>> selfRes =
+        JSArray::create(runtime, runtime.arrayPrototype);
+    if (LLVM_UNLIKELY(selfRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    lv.self = std::move(*selfRes);
+  } else {
+    CallResult<PseudoHandle<JSObject>> thisParentRes =
+        NativeConstructor::parentForNewThis_RJS(
+            runtime,
+            Handle<Callable>::vmcast(&args.getNewTarget()),
+            runtime.arrayPrototype);
+    if (LLVM_UNLIKELY(thisParentRes == ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    lv.selfParent = std::move(*thisParentRes);
+    auto arrRes = JSArray::create(runtime, lv.selfParent);
     if (LLVM_UNLIKELY(arrRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
@@ -4363,12 +4383,8 @@ CallResult<HermesValue> arrayOf(void *, Runtime &runtime, NativeArgs args) {
   // 3. Let C be the this value.
   auto C = args.getThisHandle();
 
-  CallResult<bool> isConstructorRes = isConstructor(runtime, *C);
-  if (LLVM_UNLIKELY(isConstructorRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
   // 4. If IsConstructor(C) is true, then
-  if (*isConstructorRes) {
+  if (isConstructor(runtime, *C)) {
     // a. Let A be Construct(C, «len»).
     lv.lenProp = HermesValue::encodeTrustedNumberValue(len);
     auto aRes = Callable::executeConstruct1(
@@ -4475,12 +4491,8 @@ CallResult<HermesValue> arrayFrom(void *, Runtime &runtime, NativeArgs args) {
 
   // 6. If usingIterator is not undefined, then
   if (!lv.usingIterator->isUndefined()) {
-    CallResult<bool> isConstructorRes = isConstructor(runtime, *C);
-    if (LLVM_UNLIKELY(isConstructorRes == ExecutionStatus::EXCEPTION)) {
-      return ExecutionStatus::EXCEPTION;
-    }
     // a. If IsConstructor(C) is true, then
-    if (*isConstructorRes) {
+    if (isConstructor(runtime, *C)) {
       GCScopeMarkerRAII markerConstruct{gcScope};
       // i. Let A be Construct(C).
       auto callRes =
@@ -4601,12 +4613,8 @@ CallResult<HermesValue> arrayFrom(void *, Runtime &runtime, NativeArgs args) {
     return ExecutionStatus::EXCEPTION;
   }
   uint64_t len = lengthRes->getNumberAs<uint64_t>();
-  CallResult<bool> isConstructorRes = isConstructor(runtime, *C);
-  if (LLVM_UNLIKELY(isConstructorRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
-  }
   // 12. If IsConstructor(C) is true, then
-  if (*isConstructorRes) {
+  if (isConstructor(runtime, *C)) {
     // a. Let A be Construct(C, «len»).
     lv.lenProp = std::move(*lengthRes);
     auto callRes = Callable::executeConstruct1(

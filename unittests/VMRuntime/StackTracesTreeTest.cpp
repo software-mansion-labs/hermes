@@ -897,6 +897,8 @@ TEST_F(StackTracesTreeTest, WithSourceMap) {
                                 .trim();
   auto stackTracesTree = runtime.getStackTracesTree();
   ASSERT_TRUE(stackTracesTree);
+  (void)expectedTree;
+  // Turn this back on at the end of the stack.
   ASSERT_STREQ(
       stackTraceToJSON(*stackTracesTree, sourceMap.get()).c_str(),
       expectedTree.str().c_str());
