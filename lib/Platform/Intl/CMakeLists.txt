@@ -7,17 +7,10 @@ add_hermes_library(hermesBCP47Parser BCP47Parser.cpp)
 
 if(HERMES_ENABLE_INTL)
   if(HERMES_IS_ANDROID)
-    add_subdirectory(/Users/piaskowyk/project/hermes/external/icu_decls icu4c)
     add_hermes_library(hermesPlatformIntl PlatformIntlAndroid.cpp
-        LINK_LIBS 
-        fbjni::fbjni
-        LINK_OBJLIBS 
-        hermesBCP47Parser
-        hermesPublic
-        icu4c
+        LINK_LIBS fbjni::fbjni
+        LINK_OBJLIBS hermesPublic
     )
-    hermes_link_icu(hermesPlatformIntl)
-    include_directories(/Users/piaskowyk/project/hermes/external/icu_decls)
     target_compile_options(hermesPlatformIntl_obj PRIVATE -frtti -fexceptions)
   elseif(APPLE)
     add_hermes_library(hermesPlatformIntl PlatformIntlApple.mm
@@ -28,11 +21,14 @@ if(HERMES_ENABLE_INTL)
     set_target_properties(hermesPlatformIntl_obj PROPERTIES UNITY_BUILD false)
     target_compile_options(hermesPlatformIntl_obj PRIVATE -fobjc-arc)
   else()
+    # target_include_directories(unicode PRIVATE /Users/piaskowyk/project/hermes/external/icu_decls)
+    # set(HEADER_FILES /Users/piaskowyk/project/hermes/external/icu_decls/unicode/strenum.h)
     add_hermes_library(hermesPlatformIntl PlatformIntlICU.cpp PlatformIntlShared.cpp
         LINK_OBJLIBS
         hermesBCP47Parser
         hermesPublic
     )
     hermes_link_icu(hermesPlatformIntl)
+    target_include_directories(hermesPlatformIntl PRIVATE /Users/piaskowyk/project/hermes/external/icu_decls/)
   endif()
 endif()
