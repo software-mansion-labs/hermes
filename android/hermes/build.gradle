@@ -19,17 +19,37 @@ android {
 
     externalNativeBuild {
       cmake {
-        arguments "-DHERMES_IS_ANDROID=True"
-        arguments "-DHERMES_FACEBOOK_BUILD=${rootProject.ext.facebookBuild}"
-        arguments "-DANDROID_STL=c++_shared"
-        arguments "-DANDROID_PIE=True"
-        arguments "-DIMPORT_HERMESC=${rootProject.ext.hermesC}"
-        arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
-        arguments "-DHERMES_BUILD_SHARED_JSI=True"
-        // arguments "-DCMAKE_TOOLCHAIN_FILE=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake"
-        // arguments "-DANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
-        // arguments "-DCMAKE_ANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
+        // arguments "-DHERMES_IS_ANDROID=True"
+        // arguments "-DHERMES_FACEBOOK_BUILD=${rootProject.ext.facebookBuild}"
+        // arguments "-DANDROID_STL=c++_shared"
+        // arguments "-DANDROID_PIE=True"
+        // arguments "-DIMPORT_HERMESC=${rootProject.ext.hermesC}"
+        // arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
+        // arguments "-DHERMES_BUILD_SHARED_JSI=True"
         // targets "libhermes"
+
+        arguments "-DHERMES_IS_ANDROID=True"
+        arguments "-DHERMES_FACEBOOK_BUILD=OFF"
+        arguments "-DCMAKE_BUILD_TYPE=Release"
+        arguments "-DCMAKE_TOOLCHAIN_FILE=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake"
+        // arguments "-DHERMES_UNICODE_LITE=ON"
+        // arguments "-DICU_FOUND=1"
+        arguments "-DIMPORT_HOST_COMPILERS=/Users/piaskowyk/project/hermes/build_host_hermes/ImportHostCompilers.cmake"
+        // arguments "-DHERMES_ENABLE_INTL=true"
+        // arguments "-DHERMES_ENABLE_INTL:BOOLEAN=true"
+        arguments "-DHERMES_ENABLE_DEBUGGER=ON"
+        // arguments "-DHERMESVM_ALLOW_JIT=2"
+        // arguments "-DHERMESVM_ALLOW_JIT:STRING=2"
+        arguments "-DANDROID_ABI=arm64-v8a"
+
+        arguments "-DANDROID_STL=c++_shared"
+        arguments "-DHERMES_BUILD_SHARED_JSI=True"
+        // arguments "-DANDROID_PIE=True"
+        // arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
+        arguments "-DANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
+        arguments "-DCMAKE_ANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
+
+        targets "hermesvm"
       }
     }
     ndk {

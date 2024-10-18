@@ -21,14 +21,11 @@ if(HERMES_ENABLE_INTL)
     set_target_properties(hermesPlatformIntl_obj PROPERTIES UNITY_BUILD false)
     target_compile_options(hermesPlatformIntl_obj PRIVATE -fobjc-arc)
   else()
-    # target_include_directories(unicode PRIVATE /Users/piaskowyk/project/hermes/external/icu_decls)
-    # set(HEADER_FILES /Users/piaskowyk/project/hermes/external/icu_decls/unicode/strenum.h)
     add_hermes_library(hermesPlatformIntl PlatformIntlICU.cpp PlatformIntlShared.cpp
         LINK_OBJLIBS
         hermesBCP47Parser
         hermesPublic
     )
     hermes_link_icu(hermesPlatformIntl)
-    target_include_directories(hermesPlatformIntl PRIVATE /Users/piaskowyk/project/hermes/external/icu_decls/)
   endif()
 endif()
