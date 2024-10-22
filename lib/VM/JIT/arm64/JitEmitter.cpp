@@ -485,7 +485,6 @@ void Emitter::frameSetup(
             a64::x1, StackFrameLayout::NewTarget * (int)sizeof(SHLegacyValue)));
     // Compare new.target against undefined.
     emit_sh_ljs_is_undefined(a, a64::x1, a64::x1);
-    a.cmn(a64::x1, -HVETag_Undefined);
 
     if (prohibitInvoke == ProhibitInvoke::Call) {
       // If regular calls are prohibited, then we jump to throwInvalidInvoke if
@@ -670,10 +669,16 @@ void Emitter::callWithoutThunk(void *fn, const char *name) {
 }
 
 void Emitter::loadFrameAddr(a64::GpX dst, FR frameReg) {
-  // FIXME: check range of frameReg * 8
   auto ofs =
       (frameReg.index() + StackFrameLayout::FirstLocal) * sizeof(SHLegacyValue);
-  a.add(dst, xFrame, ofs);
+  // If the offset fits as an immediate, just emit an add.
+  if (a64::Utils::isAddSubImm(ofs)) {
+    a.add(dst, xFrame, ofs);
+    return;
+  }
+  // We cannot add the offset as an immediate, so move it in first.
+  a.mov(dst, ofs);
+  a.add(dst, dst, xFrame);
 }
 
 template <bool use>
@@ -1243,12 +1248,11 @@ void Emitter::loadParam(FR frRes, uint32_t paramIndex) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "LoadParam",
        .frRes = frRes,
        .hwRes = hwRes,
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
-         em.comment("// Slow path: %s r%u", sl.name, sl.frRes.index());
+         em.comment("// Slow path: LoadParam r%u", sl.frRes.index());
          em.a.bind(sl.slowPathLab);
          em.loadBits64InGp(
              sl.hwRes.a64GpX(), _sh_ljs_undefined().raw, "undefined");
@@ -1384,23 +1388,22 @@ void Emitter::toNumber(FR frRes, FR frInput) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "toNumber",
        .frRes = frRes,
        .frInput1 = frInput,
        .hwRes = hwRes,
-       .slowCall = (void *)_sh_ljs_to_double_rjs,
-       .slowCallName = "_sh_ljs_to_double_rjs",
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// Slow path: %s r%u, r%u",
-             sl.name,
+             "// Slow path: toNumber r%u, r%u",
              sl.frRes.index(),
              sl.frInput1.index());
          em.a.bind(sl.slowPathLab);
          em.a.mov(a64::x0, xRuntime);
          em.loadFrameAddr(a64::x1, sl.frInput1);
-         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+         EMIT_RUNTIME_CALL(
+             em,
+             double (*)(SHRuntime *, const SHLegacyValue *),
+             _sh_ljs_to_double_rjs);
          em.movHWFromHW<false>(sl.hwRes, HWReg::vecD(0));
          em.a.b(sl.contLab);
        }});
@@ -1435,23 +1438,22 @@ void Emitter::toNumeric(FR frRes, FR frInput) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "toNumeric",
        .frRes = frRes,
        .frInput1 = frInput,
        .hwRes = hwRes,
-       .slowCall = (void *)_sh_ljs_to_numeric_rjs,
-       .slowCallName = "_sh_ljs_to_numeric_rjs",
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// Slow path: %s r%u, r%u",
-             sl.name,
+             "// Slow path: toNumeric r%u, r%u",
              sl.frRes.index(),
              sl.frInput1.index());
          em.a.bind(sl.slowPathLab);
          em.a.mov(a64::x0, xRuntime);
          em.loadFrameAddr(a64::x1, sl.frInput1);
-         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *),
+             _sh_ljs_to_numeric_rjs);
          em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
          em.a.b(sl.contLab);
        }});
@@ -1491,15 +1493,13 @@ void Emitter::toInt32(FR frRes, FR frInput) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "to_int32",
        .frRes = frRes,
        .frInput1 = frInput,
        .hwRes = hwRes,
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// %s r%u, r%u, r%u",
-             sl.name,
+             "// to_int32 r%u, r%u, r%u",
              sl.frRes.index(),
              sl.frInput1.index(),
              sl.frInput2.index());
@@ -2125,8 +2125,6 @@ void Emitter::getArgumentsLength(FR frRes, FR frLazyReg) {
        .frRes = frRes,
        .frInput1 = frLazyReg,
        .hwRes = hwRes,
-       .slowCall = (void *)_sh_ljs_get_arguments_length,
-       .slowCallName = "_sh_ljs_get_arguments_length",
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
@@ -2137,7 +2135,10 @@ void Emitter::getArgumentsLength(FR frRes, FR frLazyReg) {
          em.a.mov(a64::x0, xRuntime);
          em.a.mov(a64::x1, xFrame);
          em.loadFrameAddr(a64::x2, sl.frInput1);
-         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+             _sh_ljs_get_arguments_length);
          em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
          em.a.b(sl.contLab);
        }});
@@ -3305,7 +3306,6 @@ void Emitter::emitROData() {
 void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
   comment("// Call r%u, r%u, %u", frRes.index(), frCallee.index(), argc);
   uint32_t nRegs = frameRegs_.size();
-  syncAllFRTempExcept(FR());
 
   FR calleeFrameArg{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
 
@@ -3344,6 +3344,7 @@ void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
   }
 #endif
 
+  syncAllFRTempExcept(FR());
   freeAllFRTempExcept({});
 
   a.mov(a64::x0, xRuntime);
@@ -3352,7 +3353,7 @@ void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _sh_ljs_call);
+      _jit_dispatch_call);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -3410,7 +3411,7 @@ void Emitter::callN(FR frRes, FR frCallee, llvh::ArrayRef<FR> args) {
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _sh_ljs_call);
+      _jit_dispatch_call);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -3444,6 +3445,8 @@ void Emitter::callBuiltin(FR frRes, uint32_t builtinIndex, uint32_t argc) {
   // subtract 1.
   a.mov(a64::w2, argc - 1);
   a.mov(a64::w3, builtinIndex);
+  // NOTE: _sh_ljs_call_builtin does not itself populate the SavedIP field, but
+  // it will be populated by NativeFunction::_nativeCall.
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t, uint32_t),
@@ -3514,7 +3517,7 @@ void Emitter::callWithNewTarget(
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _sh_ljs_call);
+      _jit_dispatch_call);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -3574,7 +3577,7 @@ void Emitter::callWithNewTargetLong(
   EMIT_RUNTIME_CALL(
       *this,
       SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _sh_ljs_call);
+      _jit_dispatch_call);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
@@ -3740,15 +3743,13 @@ void Emitter::bitNot(FR frRes, FR frInput) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "to_int32",
        .frRes = frRes,
        .frInput1 = frInput,
        .hwRes = hwRes,
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// %s r%u, r%u, r%u",
-             sl.name,
+             "// bitNot r%u, r%u, r%u",
              sl.frRes.index(),
              sl.frInput1.index(),
              sl.frInput2.index());
@@ -3942,18 +3943,14 @@ void Emitter::mod(bool forceNumber, FR frRes, FR frLeft, FR frRight) {
   slowPaths_.push_back(
       {.slowPathLab = slowPathLab,
        .contLab = contLab,
-       .name = "mod",
        .frRes = frRes,
        .frInput1 = frLeft,
        .frInput2 = frRight,
        .hwRes = hwRes,
-       .slowCall = (void *)_sh_ljs_mod_rjs,
-       .slowCallName = "_sh_ljs_mod_rjs",
        .emittingIP = emittingIP,
        .emit = [](Emitter &em, SlowPath &sl) {
          em.comment(
-             "// %s r%u, r%u, r%u",
-             sl.name,
+             "// mod r%u, r%u, r%u",
              sl.frRes.index(),
              sl.frInput1.index(),
              sl.frInput2.index());
@@ -3961,7 +3958,11 @@ void Emitter::mod(bool forceNumber, FR frRes, FR frLeft, FR frRight) {
          em.a.mov(a64::x0, xRuntime);
          em.loadFrameAddr(a64::x1, sl.frInput1);
          em.loadFrameAddr(a64::x2, sl.frInput2);
-         em.callThunkWithSavedIP(sl.slowCall, sl.slowCallName);
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(
+                 SHRuntime *, const SHLegacyValue *, const SHLegacyValue *),
+             _sh_ljs_mod_rjs);
          em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
          em.a.b(sl.contLab);
        }});
