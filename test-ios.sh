@@ -28,11 +28,11 @@
 
 # tar -czvf react-native-artifacts-hermes-ios-debug.tar.gz -C react-native-artifacts-hermes-ios-debug .
 
-export DEBUG=true && ./utils/build-ios-framework.sh
-cmake -S . -B build_static_hermes -G Ninja
-cmake --build ./build_static_hermes -j 10
-mkdir destroot/bin
-cp build_static_hermes/bin/{hermes,hermesc,hermes-lit} ./destroot/bin
+# export DEBUG=true && ./utils/build-ios-framework.sh
+# cmake -S . -B build_static_hermes -G Ninja
+# cmake --build ./build_static_hermes -j 10
+# mkdir destroot/bin
+# cp build_static_hermes/bin/{hermes,hermesc,hermes-lit} ./destroot/bin
 
 # release
 export DEBUG=false && ./utils/build-ios-framework.sh

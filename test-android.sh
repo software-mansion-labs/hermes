@@ -16,7 +16,10 @@ cmake . \
   -DHERMES_ENABLE_INTL:BOOLEAN=true \
   -DHERMES_IS_ANDROID=True \
   -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
+  -DANDROID_ABI=arm64-v8a \
   -G Ninja
+  # -DHERMESVM_ALLOW_JIT=2 \
+  # -DHERMESVM_ALLOW_JIT:STRING=2 \
 
 cmake --build build_android -j 10
 
