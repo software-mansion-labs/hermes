@@ -6,23 +6,11 @@
 if(HERMES_ENABLE_DEBUGGER)
   # Some inspector sources need to be built without RTTI because they consume
   # internal data structures compiled without RTTI.
-
   set(CDP_NO_EH_RTTI_SOURCES
     cdp/JSONValueInterfaces.cpp
     cdp/MessageConverters.cpp
     cdp/MessageInterfaces.cpp
     cdp/MessageTypes.cpp
-  )
-  
-  set(INSPECTOR_NO_EH_RTTI_SOURCES
-    cdp/JSONValueInterfaces.cpp
-    cdp/MessageConverters.cpp
-    cdp/MessageInterfaces.cpp
-    cdp/MessageTypes.cpp
-    inspector/chrome/JSONValueInterfaces.cpp
-    inspector/chrome/MessageConverters.cpp
-    inspector/chrome/MessageInterfaces.cpp
-    inspector/chrome/MessageTypes.cpp
   )
 
   if (NOT HERMES_ENABLE_EH AND NOT HERMES_ENABLE_RTTI)
@@ -53,20 +41,10 @@ if(HERMES_ENABLE_DEBUGGER)
     cdp/ConsoleMessage.cpp
     cdp/CDPDebugAPI.cpp
     cdp/DomainState.cpp
-  )
-
-  set(INSPECTOR_API_SOURCES
-    inspector/chrome/CallbackOStream.cpp
-    inspector/chrome/CDPHandler.cpp
-    inspector/chrome/RemoteObjectConverters.cpp
-    inspector/chrome/RemoteObjectsTable.cpp
-    inspector/RuntimeAdapter.cpp
-    ${CDP_API_SOURCES}
-    ${INSPECTOR_NO_EH_RTTI_SOURCES}
+    ${CDP_NO_EH_RTTI_SOURCES}
   )
 
   # Even in lean builds, the inspector needs the parser to parse JSON.
-  set(INSPECTOR_DEPS hermesParser)
   set(CDP_DEPS hermesParser)
 endif()
 
@@ -77,7 +55,6 @@ set(api_sources
   DebuggerAPI.cpp
   AsyncDebuggerAPI.cpp
   RuntimeTaskRunner.cpp
-  ${INSPECTOR_API_SOURCES}
   ${CDP_API_SOURCES}
   )
 
@@ -103,7 +80,7 @@ target_include_directories(hermesapi_obj PUBLIC ..)
 
 add_hermes_library(hermesapiLean
         ${api_sources}
-        LINK_OBJLIBS hermesPublic LINK_LIBS jsi hermesParser ${CDP_DEPS})
+        LINK_OBJLIBS hermesPublic LINK_LIBS jsi ${CDP_DEPS})
 target_include_directories(hermesapiLean_obj PUBLIC ..)
 target_compile_definitions(hermesapiLean_obj PUBLIC HERMESVM_LEAN)
 
