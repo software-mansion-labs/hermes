@@ -702,7 +702,13 @@ include_directories(BEFORE
   )
 
 if(HERMES_IS_ANDROID)
-  find_package(fbjni REQUIRED CONFIG)
+  # find_package(fbjni REQUIRED CONFIG)
+
+  set(FBJNI_LIBRARY_DIR /Users/piaskowyk/project/hermes/fbjni/prefab/modules/fbjni/)
+  include_directories(${FBJNI_LIBRARY_DIR}/include)
+  add_library(fbjni::fbjni SHARED IMPORTED)
+  set_target_properties(fbjni::fbjni PROPERTIES IMPORTED_LOCATION /Users/piaskowyk/project/hermes/fbjni/jni/arm64-v8a/libfbjni.so)
+
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -715,7 +721,7 @@ add_subdirectory(lib)
 add_subdirectory(public)
 add_subdirectory(external)
 add_subdirectory(API)
-add_subdirectory(android/intltest/java/com/facebook/hermes/test)
+# add_subdirectory(android/intltest/java/com/facebook/hermes/test)
 
 if(HERMES_ENABLE_TOOLS)
   add_subdirectory(tools)

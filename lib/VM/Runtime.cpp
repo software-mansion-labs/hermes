@@ -275,7 +275,7 @@ Runtime::Runtime(
           runtimeConfig.getCrashMgr(),
           std::move(provider),
           runtimeConfig.getVMExperimentFlags()),
-      jitContext_(runtimeConfig.getEnableJIT()),
+      jitContext_(true), // only for build with JIT
       hasES6Promise_(runtimeConfig.getES6Promise()),
       hasES6Proxy_(runtimeConfig.getES6Proxy()),
       hasES6Class_(runtimeConfig.getES6Class()),
@@ -422,7 +422,7 @@ Runtime::Runtime(
   jitContext_.setEnabled(false);
   // Execute our internal bytecode.
   auto jsBuiltinsObj = runInternalJavaScript();
-  jitContext_.setEnabled(runtimeConfig.getEnableJIT());
+  jitContext_.setEnabled(true);
   codeCoverageProfiler_->restore();
 
   // Populate JS builtins returned from internal bytecode to the builtins table.
