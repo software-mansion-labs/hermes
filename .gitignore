@@ -42,3 +42,4 @@ playground/
 destroot*
 staging/
 fbjni
+tmp/
