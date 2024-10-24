@@ -166,6 +166,7 @@ target_link_libraries(hermesvmlean_a PUBLIC
 # CMake requires at least one file for the target, so create an empty file.
 add_library(hermesvm SHARED dummy.cpp)
 add_library(hermesvmlean SHARED dummy.cpp)
+add_library(libhermes ALIAS hermesvm) # for compatibility with react-native
 
 if(APPLE)
 
