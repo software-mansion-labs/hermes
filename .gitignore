@@ -41,3 +41,5 @@ cmake-build*/
 playground/
 destroot*
 staging/
+fbjni
+tmp/
