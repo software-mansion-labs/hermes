@@ -169,6 +169,7 @@ add_library(hermesvmlean SHARED dummy.cpp)
 
 # for compatibility with react-native
 add_custom_target(libhermes DEPENDS hermesvm)
+add_custom_target(libhermesvm DEPENDS hermesvm)
 
 if(APPLE)
 
