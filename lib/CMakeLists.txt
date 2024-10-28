@@ -171,36 +171,36 @@ add_library(hermesvmlean SHARED dummy.cpp)
 add_custom_target(libhermes DEPENDS hermesvm)
 add_custom_target(libhermesvm DEPENDS hermesvm)
 
-if(APPLE)
+# if(APPLE)
 
-set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
+# set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
 
-set_target_properties(hermesvm PROPERTIES
-  FRAMEWORK TRUE
-  VERSION ${PROJECT_VERSION}
-  SOVERSION ${PROJECT_VERSION}
-  FRAMEWORK_VERSION ${PROJECT_VERSION_MAJOR}
-  MACOSX_FRAMEWORK_SHORT_VERSION_STRING ${PROJECT_VERSION}
-  MACOSX_FRAMEWORK_BUNDLE_VERSION ${PROJECT_VERSION}
-  MACOSX_FRAMEWORK_IDENTIFIER dev.hermesengine.${HERMES_APPLE_TARGET_PLATFORM}
-)
+# set_target_properties(hermesvm PROPERTIES
+#   FRAMEWORK TRUE
+#   VERSION ${PROJECT_VERSION}
+#   SOVERSION ${PROJECT_VERSION}
+#   FRAMEWORK_VERSION ${PROJECT_VERSION_MAJOR}
+#   MACOSX_FRAMEWORK_SHORT_VERSION_STRING ${PROJECT_VERSION}
+#   MACOSX_FRAMEWORK_BUNDLE_VERSION ${PROJECT_VERSION}
+#   MACOSX_FRAMEWORK_IDENTIFIER dev.hermesengine.${HERMES_APPLE_TARGET_PLATFORM}
+# )
 
-add_custom_command(TARGET hermesvm POST_BUILD
-  COMMAND /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string ${CMAKE_OSX_DEPLOYMENT_TARGET}" $<TARGET_FILE_DIR:hermesvm>/Info.plist
-)
+# add_custom_command(TARGET hermesvm POST_BUILD
+#   COMMAND /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string ${CMAKE_OSX_DEPLOYMENT_TARGET}" $<TARGET_FILE_DIR:hermesvm>/Info.plist
+# )
 
-install(TARGETS hermesvm
-  RUNTIME DESTINATION bin
-  LIBRARY DESTINATION lib
-  ARCHIVE DESTINATION lib
-  FRAMEWORK DESTINATION Library/Frameworks/${HERMES_APPLE_TARGET_PLATFORM}
-)
+# install(TARGETS hermesvm
+#   RUNTIME DESTINATION bin
+#   LIBRARY DESTINATION lib
+#   ARCHIVE DESTINATION lib
+#   FRAMEWORK DESTINATION Library/Frameworks/${HERMES_APPLE_TARGET_PLATFORM}
+# )
 
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
-  FILES_MATCHING PATTERN "*.h"
-  PATTERN "synthtest" EXCLUDE)
+# install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
+#   FILES_MATCHING PATTERN "*.h"
+#   PATTERN "synthtest" EXCLUDE)
 
-endif()
+# endif()
 
 # Force the entire hermesvm_a library to be used by hermesvm. There is
 # no cross platform way to do this (force_load is for macOS). Once we upgrade
@@ -210,9 +210,8 @@ endif()
 # That is, we do not want libraries that depend on hermesvm to link in an extra
 # copy of any static libraries linked into it.
 if(APPLE)
-  target_link_libraries(hermesvm PUBLIC -force_load hermesvm_a)
-  target_link_libraries(hermesvmlean PUBLIC -force_load hermesvmlean_a)
-  add_custom_target(build_hermesvm ALL DEPENDS hermesvm)
+  target_link_libraries(hermesvm PRIVATE -force_load hermesvm_a)
+  target_link_libraries(hermesvmlean PRIVATE -force_load hermesvmlean_a)
 else()
   target_link_libraries(hermesvm PRIVATE
     -Wl,--whole-archive
@@ -235,9 +234,9 @@ target_include_directories(hermesvm PUBLIC ${CMAKE_SOURCE_DIR}/public ${CMAKE_SO
 # that depend on hermesvm. If JSI is built as a shared library, ensure it is
 # added to the link line for anything that depends on hermesvm. If it's a static
 # library, ensure it isn't since that would link in JSI twice.
-# if (HERMES_BUILD_SHARED_JSI)
+if (HERMES_BUILD_SHARED_JSI)
   target_link_libraries(hermesvm PUBLIC jsi)
-# endif()
+endif()
 
 # Apply additional linker flags.
 target_link_options(hermesvm PUBLIC ${HERMES_EXTRA_LINKER_FLAGS})
@@ -245,8 +244,8 @@ target_link_options(hermesvmlean PUBLIC ${HERMES_EXTRA_LINKER_FLAGS})
 
 if(HERMES_ENABLE_INTL)
   set(INTL_OBJ_LIBS hermesPlatformIntl_obj hermesBCP47Parser_obj)
-  target_link_libraries(hermesvm_a PUBLIC ${INTL_OBJ_LIBS})
-  target_link_libraries(hermesvmlean_a PUBLIC ${INTL_OBJ_LIBS})
+  target_link_libraries(hermesvm_a PRIVATE ${INTL_OBJ_LIBS})
+  target_link_libraries(hermesvmlean_a PRIVATE ${INTL_OBJ_LIBS})
 endif()
 
 # Construct the HermesVM model string
