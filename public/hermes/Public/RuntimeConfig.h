@@ -48,6 +48,9 @@ class PinnedHermesValue;
   /* Native stack remaining before assuming overflow */                \
   F(constexpr, unsigned, NativeStackGap, 64 * 1024)                    \
                                                                        \
+  /* Whether or not the JIT is enabled */                              \
+  F(constexpr, bool, EnableJIT, false)                                 \
+                                                                       \
   /* Whether to allow eval and Function ctor */                        \
   F(constexpr, bool, EnableEval, true)                                 \
                                                                        \
@@ -120,9 +123,6 @@ class PinnedHermesValue;
                                                                        \
   /* The flags passed from a VM experiment */                          \
   F(constexpr, uint32_t, VMExperimentFlags, 0)                         \
-                                                                       \
-  /* Whether or not the JIT is enabled */                              \
-  F(constexpr, bool, EnableJIT, false)                                 \
   /* RUNTIME_FIELDS END */
 
 _HERMES_CTORCONFIG_STRUCT(RuntimeConfig, RUNTIME_FIELDS, {})

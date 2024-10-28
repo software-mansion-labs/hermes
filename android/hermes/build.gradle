@@ -26,10 +26,7 @@ android {
         arguments "-DIMPORT_HERMESC=${rootProject.ext.hermesC}"
         arguments "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=True"
         arguments "-DHERMES_BUILD_SHARED_JSI=True"
-        // arguments "-DCMAKE_TOOLCHAIN_FILE=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125/build/cmake/android.toolchain.cmake"
-        // arguments "-DANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
-        // arguments "-DCMAKE_ANDROID_NDK=/Users/piaskowyk/Library/Android/sdk/ndk/26.1.10909125"
-        // targets "libhermes"
+        targets "libhermes"
       }
     }
     ndk {
