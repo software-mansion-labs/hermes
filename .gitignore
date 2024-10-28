@@ -38,8 +38,10 @@ cmake-build*/
 
 # clangd cache
 .cache/
+# TODO: Remove before creating the PR
 playground/
 destroot*
 staging/
 fbjni
 tmp/
+test*.sh
