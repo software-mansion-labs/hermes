@@ -167,40 +167,33 @@ target_link_libraries(hermesvmlean_a PUBLIC
 add_library(hermesvm SHARED dummy.cpp)
 add_library(hermesvmlean SHARED dummy.cpp)
 
-# for compatibility with react-native
-add_custom_target(libhermes DEPENDS hermesvm)
-# add_custom_target(libhermesvm DEPENDS hermesvm)
-set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
-
 if(APPLE)
+  set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
 
-set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
+  set_target_properties(hermesvm PROPERTIES
+    FRAMEWORK TRUE
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION}
+    FRAMEWORK_VERSION ${PROJECT_VERSION_MAJOR}
+    MACOSX_FRAMEWORK_SHORT_VERSION_STRING ${PROJECT_VERSION}
+    MACOSX_FRAMEWORK_BUNDLE_VERSION ${PROJECT_VERSION}
+    MACOSX_FRAMEWORK_IDENTIFIER dev.hermesengine.${HERMES_APPLE_TARGET_PLATFORM}
+  )
 
-set_target_properties(hermesvm PROPERTIES
-  FRAMEWORK TRUE
-  VERSION ${PROJECT_VERSION}
-  SOVERSION ${PROJECT_VERSION}
-  FRAMEWORK_VERSION ${PROJECT_VERSION_MAJOR}
-  MACOSX_FRAMEWORK_SHORT_VERSION_STRING ${PROJECT_VERSION}
-  MACOSX_FRAMEWORK_BUNDLE_VERSION ${PROJECT_VERSION}
-  MACOSX_FRAMEWORK_IDENTIFIER dev.hermesengine.${HERMES_APPLE_TARGET_PLATFORM}
-)
+  add_custom_command(TARGET hermesvm POST_BUILD
+    COMMAND /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string ${CMAKE_OSX_DEPLOYMENT_TARGET}" $<TARGET_FILE_DIR:hermesvm>/Info.plist
+  )
 
-add_custom_command(TARGET hermesvm POST_BUILD
-  COMMAND /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string ${CMAKE_OSX_DEPLOYMENT_TARGET}" $<TARGET_FILE_DIR:hermesvm>/Info.plist
-)
+  install(TARGETS hermesvm
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    FRAMEWORK DESTINATION Library/Frameworks/${HERMES_APPLE_TARGET_PLATFORM}
+  )
 
-install(TARGETS hermesvm
-  RUNTIME DESTINATION bin
-  LIBRARY DESTINATION lib
-  ARCHIVE DESTINATION lib
-  FRAMEWORK DESTINATION Library/Frameworks/${HERMES_APPLE_TARGET_PLATFORM}
-)
-
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
-  FILES_MATCHING PATTERN "*.h"
-  PATTERN "synthtest" EXCLUDE)
-
+  install(DIRECTORY "${PROJECT_SOURCE_DIR}/API/hermes" DESTINATION include
+    FILES_MATCHING PATTERN "*.h"
+    PATTERN "synthtest" EXCLUDE)
 endif()
 
 # Force the entire hermesvm_a library to be used by hermesvm. There is
