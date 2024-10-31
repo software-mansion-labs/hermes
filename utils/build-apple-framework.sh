@@ -10,12 +10,6 @@ else
   BUILD_TYPE="Release"
 fi
 
-if [ "$DEBUG" = true ]; then
-  ENABLE_DEBUGGER="ON"
-else
-  ENABLE_DEBUGGER="OFF"
-fi
-
 function command_exists {
   command -v "${1}" > /dev/null 2>&1
 }
@@ -53,8 +47,8 @@ function get_mac_deployment_target {
 
 # Build host hermes compiler for internal bytecode
 function build_host_hermesc {
-  cmake -S . -B build_host_hermesc -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
-  cmake --build ./build_host_hermesc --target hermesc shermes hermes -j 10
+  cmake -S . -B build_host_hermesc
+  cmake --build ./build_host_hermesc --target hermesc
 }
 
 # Utility function to configure an Apple framework
@@ -77,7 +71,6 @@ function configure_apple_framework {
     -DCMAKE_OSX_ARCHITECTURES:STRING="$2" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET:STRING="$3" \
     -DHERMES_ENABLE_DEBUGGER:BOOLEAN=true \
-    -DHERMES_ENABLE_DEBUGGER=true \
     -DHERMES_ENABLE_INTL:BOOLEAN=true \
     -DHERMES_ENABLE_LIBFUZZER:BOOLEAN=false \
     -DHERMES_ENABLE_FUZZILLI:BOOLEAN=false \
@@ -88,7 +81,7 @@ function configure_apple_framework {
     -DHERMES_ENABLE_TOOLS:BOOLEAN="$build_cli_tools" \
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
-    -DCMAKE_BUILD_TYPE="Release" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DIMPORT_HOST_COMPILERS="$PWD/build_host_hermesc/ImportHostCompilers.cmake"
 }
 
