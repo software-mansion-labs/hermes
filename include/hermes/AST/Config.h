@@ -10,7 +10,7 @@
 
 #if !defined(HERMES_PARSE_JSX)
 #if defined(HERMES_IS_MOBILE_BUILD)
-#define HERMES_PARSE_JSX 1
+#define HERMES_PARSE_JSX 0
 #else
 #define HERMES_PARSE_JSX 1
 #endif
@@ -18,7 +18,7 @@
 
 #if !defined(HERMES_PARSE_FLOW)
 #if defined(HERMES_IS_MOBILE_BUILD)
-#define HERMES_PARSE_FLOW 1
+#define HERMES_PARSE_FLOW 0
 #else
 #define HERMES_PARSE_FLOW 1
 #endif
@@ -26,7 +26,7 @@
 
 #if !defined(HERMES_PARSE_TS)
 #if defined(HERMES_IS_MOBILE_BUILD)
-#define HERMES_PARSE_TS 1
+#define HERMES_PARSE_TS 0
 #else
 #define HERMES_PARSE_TS 1
 #endif

@@ -92,6 +92,12 @@ set(HERMES_IS_ANDROID OFF CACHE BOOL
 set(HERMES_IS_MOBILE_BUILD ${HERMES_IS_ANDROID} CACHE BOOL
   "Building for a mobile device")
 
+set(OVERRIDE_HERMES_MOBILE_BUILD OFF CACHE BOOL
+  "Workaround for Android builds that uses ES types defined conditionally")
+if (OVERRIDE_HERMES_MOBILE_BUILD)
+  set(HERMES_IS_MOBILE_BUILD OFF)
+endif()
+
 set(HERMESVM_GCKIND HADES
   CACHE STRING
   "HermesVM GC type: MALLOC, HADES or RUNTIME")
@@ -702,7 +708,11 @@ include_directories(BEFORE
   )
 
 if(HERMES_IS_ANDROID)
-  find_package(fbjni REQUIRED CONFIG)
+  # find_package(fbjni REQUIRED CONFIG)
+  set(FBJNI_LIBRARY_DIR /Users/piaskowyk/project/hermes/fbjni/prefab/modules/fbjni/)
+  include_directories(${FBJNI_LIBRARY_DIR}/include)
+  add_library(fbjni::fbjni SHARED IMPORTED)
+  set_target_properties(fbjni::fbjni PROPERTIES IMPORTED_LOCATION /Users/piaskowyk/project/hermes/fbjni/jni/arm64-v8a/libfbjni.so)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
