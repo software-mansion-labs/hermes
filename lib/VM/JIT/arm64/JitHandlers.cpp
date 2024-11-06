@@ -209,9 +209,13 @@ void _sh_throw_invalid_call(SHRuntime *shr) {
   (void)runtime.raiseTypeError("Class constructor invoked without new");
   _sh_throw_current(shr);
 }
+void _sh_throw_register_stack_overflow(SHRuntime *shr) {
+  Runtime &runtime = getRuntime(shr);
+  (void)runtime.raiseStackOverflow(Runtime::StackOverflowKind::JSRegisterStack);
+  _sh_throw_current(shr);
+}
 
-SHLegacyValue
-_jit_dispatch_call(SHRuntime *shr, SHLegacyValue *frame, uint32_t argCount) {
+SHLegacyValue _jit_dispatch_call(SHRuntime *shr, SHLegacyValue *frame) {
   Runtime &runtime = getRuntime(shr);
 
   // TODO: Move this call setup and the fast path into the emitted JIT code.
@@ -221,7 +225,6 @@ _jit_dispatch_call(SHRuntime *shr, SHLegacyValue *frame, uint32_t argCount) {
       HermesValue::encodeNativePointer(runtime.getCurrentIP());
   newFrame.getSavedCodeBlockRef() = HermesValue::encodeNativePointer(nullptr);
   newFrame.getSHLocalsRef() = HermesValue::encodeNativePointer(nullptr);
-  newFrame.getArgCountRef() = HermesValue::encodeNativeUInt32(argCount);
 
   auto callTarget = newFrame.getCalleeClosureHandleUnsafe();
   if (vmisa<JSFunction>(*callTarget)) {

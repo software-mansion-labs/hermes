@@ -131,6 +131,10 @@ class HWReg {
   }
 };
 
+llvh::raw_ostream &operator<<(
+    llvh::raw_ostream &os,
+    const hermes::vm::arm64::HWReg &hwReg);
+
 /// A frame register can reside simultaneously in one or more of the following
 /// locations:
 /// - The stack frame
@@ -186,17 +190,13 @@ struct HWRegState {
 static constexpr auto xRuntime = a64::x19;
 // x20 is frame
 static constexpr auto xFrame = a64::x20;
-// x0 < xDoubleLim means that it is a double.
-//    cmp   x0, xDoubleLim
-//    b.hs  slowPath
-static constexpr auto xDoubleLim = a64::x21;
 
 /// GP arg registers (inclusive).
 // static constexpr std::pair<uint8_t, uint8_t> kGPArgs(0, 7);
 /// Temporary GP registers (inclusive).
 static constexpr std::pair<uint8_t, uint8_t> kGPTemp(0, 15);
 /// Callee-saved GP registers (inclusive).
-static constexpr std::pair<uint8_t, uint8_t> kGPSaved(22, 28);
+static constexpr std::pair<uint8_t, uint8_t> kGPSaved(21, 28);
 
 /// Vec arg registers (inclusive).
 // static constexpr std::pair<uint8_t, uint8_t> kVecArgs(0, 7);
@@ -286,6 +286,8 @@ class TempRegAlloc {
 class Emitter {
   /// Level of dumping JIT code. Bit 0 indicates code printing on or off.
   unsigned const dumpJitCode_;
+  /// Whether to emit asserts in the JIT'ed code.
+  bool const emitAsserts_;
 
   std::unique_ptr<asmjit::Logger> logger_{};
   std::unique_ptr<asmjit::ErrorHandler> errorHandler_;
@@ -359,13 +361,6 @@ class Emitter {
   /// in x22.
   asmjit::Label returnLabel_{};
 
-  /// Label to branch to when a function is invoked in a way that conflicts with
-  /// its ProhibitInvoke flags. The label will only be initialized if the
-  /// function restricts how it can be called (e.g. arrow functions and
-  /// generators), in which case the check at entry on the invocation type will
-  /// branch to this label if the invocation is invalid.
-  asmjit::Label throwInvalidInvoke_{};
-
   /// The bytecode codeblock.
   CodeBlock *const codeBlock_;
 
@@ -393,6 +388,7 @@ class Emitter {
   explicit Emitter(
       asmjit::JitRuntime &jitRT,
       unsigned dumpJitCode,
+      bool emitAsserts,
       CodeBlock *codeBlock,
       PropertyCacheEntry *readPropertyCache,
       PropertyCacheEntry *writePropertyCache,
@@ -622,14 +618,6 @@ class Emitter {
       false,
       false,
       "greater_equal",
-      _sh_ljs_greater_equal_rjs,
-      b_ge)
-  DECL_JCOND(jGreaterN, true, false, "greater_n", _sh_ljs_greater_rjs, b_gt)
-  DECL_JCOND(
-      jGreaterEqualN,
-      true,
-      false,
-      "greater_equal_n",
       _sh_ljs_greater_equal_rjs,
       b_ge)
   DECL_JCOND(jLess, false, false, "less", _sh_ljs_less_rjs, b_mi)
@@ -944,8 +932,14 @@ class Emitter {
 
   /// \return a valid register if the FR is in a hw register, otherwise invalid.
   HWReg _isFRInRegister(FR fr);
-  HWReg getOrAllocFRInVecD(FR fr, bool load);
-  HWReg getOrAllocFRInGpX(FR fr, bool load);
+  HWReg getOrAllocFRInVecD(
+      FR fr,
+      bool load,
+      llvh::Optional<HWReg> preferred = llvh::None);
+  HWReg getOrAllocFRInGpX(
+      FR fr,
+      bool load,
+      llvh::Optional<HWReg> preferred = llvh::None);
   HWReg getOrAllocFRInAnyReg(
       FR fr,
       bool load,
@@ -964,6 +958,9 @@ class Emitter {
   bool isFRKnownNumber(FR fr) const {
     return isFRKnownType(fr, FRType::Number);
   }
+
+  /// Get the current bytecode IP in \p xOut.
+  void getBytecodeIP(const a64::GpX &xOut);
 
  private:
   /// Allocate or return the offset in RO DATA of the current function's debug
@@ -1016,6 +1013,12 @@ class Emitter {
   void emitROData();
 
  private:
+  /// Set up the call frame and perform the call. The caller should have already
+  /// populated the arg count and new target registers.
+  /// \param frRes is the frame register that will contain the result.
+  /// \param frCallee is a frame register containing the callee.
+  void callImpl(FR frRes, FR frCallee);
+
   void arithUnop(
       bool forceNumber,
       FR frRes,

@@ -529,7 +529,7 @@ Value *ESTreeIRGen::genCallExpr(ESTree::CallExpressionNode *call) {
   Value *res =
       emitCall(call, callee, target, calleeIsAlwaysClosure, thisVal, newTarget);
   if (fieldInitClassType) {
-    emitFieldInitCall(fieldInitClassType);
+    emitTypedFieldInitCall(fieldInitClassType);
   }
   return res;
 }
@@ -754,7 +754,7 @@ Value *ESTreeIRGen::emitCall(
         newTarget,
         thisVal,
         args);
-    if (auto *functionType = llvh::dyn_cast<flow::BaseFunctionType>(
+    if (llvh::isa<flow::BaseFunctionType>(
             flowContext_.getNodeTypeOrAny(getCallee(call))->info)) {
       // Every BaseFunctionType currently is going to be compiled to a
       // NativeJSFunction, so always set this flag.
@@ -811,7 +811,7 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genMemberExpression(
           nullptr,
           Builder.getLiteralUndefined()};
     }
-    if (auto *classType = llvh::dyn_cast<flow::ClassType>(
+    if (llvh::isa<flow::ClassType>(
             flowContext_.getNodeTypeOrAny(superNode)->info)) {
       auto *property = llvh::dyn_cast<ESTree::IdentifierNode>(mem->_property);
       if (!property || mem->_computed) {
@@ -1001,7 +1001,7 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitTypedSuperLoad(
       thisValue};
 }
 
-void ESTreeIRGen::emitFieldStore(
+void ESTreeIRGen::emitTypedFieldStore(
     flow::ClassType *classType,
     ESTree::Node *prop,
     Value *object,
@@ -1027,7 +1027,7 @@ void ESTreeIRGen::emitMemberStore(
   if (auto *classType = llvh::dyn_cast<flow::ClassType>(
           flowContext_.getNodeTypeOrAny(mem->_object)->info)) {
     if (!mem->_computed) {
-      emitFieldStore(classType, mem->_property, baseValue, storedValue);
+      emitTypedFieldStore(classType, mem->_property, baseValue, storedValue);
       return;
     }
   }
@@ -1052,7 +1052,7 @@ void ESTreeIRGen::emitMemberStore(
 
   // Check if we are storing to a FastArray, and generate the specialised
   // instruction for it.
-  if (auto *arrayType = llvh::dyn_cast<flow::ArrayType>(
+  if (llvh::isa<flow::ArrayType>(
           flowContext_.getNodeTypeOrAny(mem->_object)->info)) {
     if (mem->_computed &&
         llvh::isa<flow::NumberType>(
@@ -2492,7 +2492,7 @@ Value *ESTreeIRGen::genNewExpr(ESTree::NewExpressionNode *N) {
     auto *proto = Builder.createUnionNarrowTrustedInst(
         Builder.createLoadFrameInst(RSI, it->second.homeObjectVar),
         Type::createObject());
-    Value *newInst = emitClassAllocation(classType, proto);
+    Value *newInst = emitTypedClassAllocation(classType, proto);
 
     // Call the constructor, if necessary.  There is always a constructor,
     // either explicit or implicit.  We will load an implicit ctor (for

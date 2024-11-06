@@ -42,6 +42,7 @@
 #include "hermes/Support/Warning.h"
 #include "hermes/Utils/Dumper.h"
 #include "hermes/Utils/Options.h"
+#include "hermes/VM/JIT/Config.h"
 
 #include "llvh/Support/CommandLine.h"
 #include "llvh/Support/Debug.h"
@@ -455,6 +456,12 @@ static opt<bool> DumpBetweenPasses(
     init(false),
     Hidden,
     desc("Print IR after every optimization pass"),
+    cat(CompilerCategory));
+
+static opt<bool> Colors(
+    "colors",
+    init(false),
+    desc("Use colors in some dumps"),
     cat(CompilerCategory));
 
 #ifndef NDEBUG
@@ -1044,6 +1051,7 @@ std::shared_ptr<Context> createContext(
       cl::DumpSourceLocation != LocationDumpMode::None;
   codeGenOpts.dumpIRBetweenPasses = cl::DumpBetweenPasses;
   codeGenOpts.verifyIRBetweenPasses = cl::VerifyIR;
+  codeGenOpts.colors = cl::Colors;
   codeGenOpts.dumpFunctions.insert(
       cl::DumpFunctions.begin(), cl::DumpFunctions.end());
   codeGenOpts.noDumpFunctions.insert(
@@ -2146,6 +2154,9 @@ void printHermesVersion(
 #endif
 #ifdef HERMES_ENABLE_UNICODE_REGEXP_PROPERTY_ESCAPES
       << "    Unicode RegExp Property Escapes\n"
+#endif
+#if HERMESVM_JIT
+      << "    JIT\n"
 #endif
       << "    Zip file input\n";
   }

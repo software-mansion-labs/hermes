@@ -26,6 +26,21 @@
 #endif
 
 namespace hermes::vm::arm64 {
+
+llvh::raw_ostream &operator<<(
+    llvh::raw_ostream &os,
+    const hermes::vm::arm64::HWReg &hwReg) {
+  if (hwReg.isValidGpX()) {
+    os << "x" << (int)hwReg.indexInClass();
+  } else if (hwReg.isValidVecD()) {
+    os << "d" << (int)hwReg.indexInClass();
+  } else {
+    assert(!hwReg.isValid());
+    os << "<invalid>";
+  }
+  return os;
+}
+
 namespace {
 
 // Ensure that HermesValue tags are handled correctly by updating this every
@@ -303,18 +318,22 @@ static bool isCheapConst(uint64_t k) {
 Emitter::Emitter(
     asmjit::JitRuntime &jitRT,
     unsigned dumpJitCode,
+    bool emitAsserts,
     CodeBlock *codeBlock,
     PropertyCacheEntry *readPropertyCache,
     PropertyCacheEntry *writePropertyCache,
     uint32_t numFrameRegs,
     const std::function<void(std::string &&message)> &longjmpError)
     : dumpJitCode_(dumpJitCode),
+      emitAsserts_(emitAsserts),
       frameRegs_(numFrameRegs),
       codeBlock_(codeBlock) {
   if (dumpJitCode_ & DumpJitCode::Code)
     logger_ = std::unique_ptr<asmjit::Logger>(new OurLogger());
-  if (logger_)
+  if (logger_) {
     logger_->setIndentation(asmjit::FormatIndentationGroup::kCode, 4);
+    logger_->addFlags(asmjit::FormatFlags::kHexImms);
+  }
 
   errorHandler_ = std::unique_ptr<asmjit::ErrorHandler>(
       new OurErrorHandler(expectedError_, longjmpError));
@@ -357,7 +376,7 @@ void Emitter::enter(uint32_t numCount, uint32_t npCount) {
     frameRegs_[frIndex].globalType = FRType::Number;
   }
   // Non-pointer regs: allocate in gp regs first.
-  for (unsigned frIndex = 0; frIndex < npCount; ++frIndex) {
+  for (unsigned frIndex = numCount; frIndex < npCount + numCount; ++frIndex) {
     HWReg hwReg;
     if (nextGp <= kGPSaved.second) {
       hwReg = HWReg::gpX(nextGp);
@@ -473,56 +492,37 @@ void Emitter::frameSetup(
       vecSaveCount <= kVecSaved.second - kVecSaved.first + 1 &&
       "Too many callee saved Vec regs");
 
-  auto prohibitInvoke = codeBlock_->getHeaderFlags().prohibitInvoke;
-  if (prohibitInvoke != ProhibitInvoke::None) {
-    // Load the new frame pointer. We leave x0 untouched since it contains the
-    // runtime parameter, which is used below and in throwInvalidInvoke_.
-    a.ldr(a64::x1, a64::Mem(a64::x0, offsetof(Runtime, stackPointer_)));
-    // Load new.target.
-    a.ldur(
-        a64::x1,
-        a64::Mem(
-            a64::x1, StackFrameLayout::NewTarget * (int)sizeof(SHLegacyValue)));
-    // Compare new.target against undefined.
-    emit_sh_ljs_is_undefined(a, a64::x1, a64::x1);
-
-    if (prohibitInvoke == ProhibitInvoke::Call) {
-      // If regular calls are prohibited, then we jump to throwInvalidInvoke if
-      // new.target is undefined.
-      throwInvalidInvoke_ = a.newNamedLabel("throwInvalidCall");
-      a.b_eq(throwInvalidInvoke_);
-    } else if (prohibitInvoke == ProhibitInvoke::Construct) {
-      // If construct calls are prohibited, then we jump to throwInvalidInvoke
-      // if new.target is not undefined.
-      throwInvalidInvoke_ = a.newNamedLabel("throwInvalidConstruct");
-      a.b_ne(throwInvalidInvoke_);
-    }
-  }
-
   static_assert(
-      kGPSaved.first == 22, "Callee saved GP regs must start from x22");
-  // Always save x22.
+      kGPSaved.first == 21, "Callee saved GP regs must start from x21");
+  // Always save x21 even if it is not needed for an FR because we use it for
+  // the return value.
   if (gpSaveCount == 0)
     gpSaveCount = 1;
-  // We always save x19, x20, x21.
-  gpSaveCount += 3;
+  // We always save x19 and x20 since they are used for xRuntime and xFrame.
+  gpSaveCount += 2;
 
   gpSaveCount_ = gpSaveCount;
   vecSaveCount_ = vecSaveCount;
 
-  //  0-3: SHLocals
-  //  4: x22
-  //  5: x21
-  //  6: x20
-  //  7: x19
-  //  8: x29 <- new x29 points here
-  //  9: x30
+  // +-------+----- old sp
+  // |  x30  |
+  // +-------+
+  // |  x29  |
+  // +-------+----- new x29
+  // |  ...  |
+  // +-------+
+  // |  x21  |
+  // +-------+
+  // |  x20  |
+  // +-------+
+  // |  x19  |
+  // +-------+---- new sp
   a.sub(
       a64::sp,
       a64::sp,
-      (4 + ((gpSaveCount + 1) & ~1) + ((vecSaveCount + 1) & ~1) + 2) * 8);
+      (((gpSaveCount + 1) & ~1) + ((vecSaveCount + 1) & ~1) + 2) * 8);
 
-  unsigned stackOfs = 4 * 8;
+  unsigned stackOfs = 0;
   for (unsigned i = 0; i < gpSaveCount; i += 2, stackOfs += 16) {
     if (i + 1 < gpSaveCount)
       a.stp(a64::GpX(19 + i), a64::GpX(20 + i), a64::Mem(a64::sp, stackOfs));
@@ -541,41 +541,182 @@ void Emitter::frameSetup(
   a.stp(a64::x29, a64::x30, a64::Mem(a64::sp, stackOfs));
   a.add(a64::x29, a64::sp, stackOfs);
 
-  // ((uint64_t)HVTag_First << kHV_NumDataBits)
-  static_assert(
-      HERMESVALUE_VERSION == 1,
-      "HVTag_First must be the first after double limit");
-  comment("// xDoubleLim");
-  a.mov(xDoubleLim, ((uint64_t)HVTag_First << kHV_NumDataBits));
-
   comment("// xRuntime");
   a.mov(xRuntime, a64::x0);
 
-  //  _sh_check_native_stack_overflow(shr);
-  // Do not save the IP because we have not yet set up the stack frame for this
-  // function. If this throws, the exception should appear in the caller.
-  EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-      *this, void (*)(SHRuntime *), _sh_check_native_stack_overflow);
+#ifndef HERMES_CHECK_NATIVE_STACK
+#error Only native stack checking is supported in the JIT
+#endif
 
-  // Function<bench>(3 params, 13 registers):
+  comment("// _sh_check_native_stack_overflow");
+  asmjit::Label nativeOverflowLab = newSlowPathLabel();
+  asmjit::Label nativeOverflowContLab = newContLabel();
+  // Get the stack bounds from the runtime.
+  a.ldr(a64::x0, a64::Mem(xRuntime, RuntimeOffsets::nativeStackHigh));
+  a.ldr(a64::x1, a64::Mem(xRuntime, RuntimeOffsets::nativeStackSize));
+  // Subtract the frame pointer from nativeStackHigh and compare it against the
+  // size. If the difference is less than the stack size, then we are still
+  // within the current stack bounds.
+  a.sub(a64::x0, a64::x0, a64::x29);
+  a.cmp(a64::x0, a64::x1);
+  // If the frame pointer is within bounds, we are done. Otherwise, we need to
+  // check if the bounds have changed.
+  a.b_hi(nativeOverflowLab);
+  a.bind(nativeOverflowContLab);
+  slowPaths_.push_back(
+      {.slowPathLab = nativeOverflowLab,
+       .contLab = nativeOverflowContLab,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment("// Slow path: _sh_check_native_stack_overflow");
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         // Do not save the IP because we have not yet set up the stack frame
+         // for this function. If this throws, the exception should appear in
+         // the caller.
+         EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
+             em, void (*)(SHRuntime *), _sh_check_native_stack_overflow);
+         em.a.b(sl.contLab);
+       }});
+
+  comment("// xFrame");
+  a.ldr(xFrame, a64::Mem(xRuntime, offsetof(Runtime, stackPointer_)));
+
+  // If the function has a prohibitInvoke flag, we need to check if it has been
+  // called correctly.
+  auto prohibitInvoke = codeBlock_->getHeaderFlags().prohibitInvoke;
+  if (prohibitInvoke != ProhibitInvoke::None) {
+    // Load new.target.
+    a.ldur(
+        a64::x0,
+        a64::Mem(
+            xFrame, StackFrameLayout::NewTarget * (int)sizeof(SHLegacyValue)));
+    // Compare new.target against undefined.
+    emit_sh_ljs_is_undefined(a, a64::x0, a64::x0);
+
+    void (*slowCall)(SHRuntime *);
+    const char *slowCallName;
+    asmjit::Label throwInvalidInvokeLab;
+    if (prohibitInvoke == ProhibitInvoke::Call) {
+      // If regular calls are prohibited, then we jump to throwInvalidInvoke if
+      // new.target is undefined.
+      throwInvalidInvokeLab = a.newNamedLabel("throwInvalidCall");
+      a.b_eq(throwInvalidInvokeLab);
+
+      slowCall = _sh_throw_invalid_call;
+      slowCallName = "_sh_throw_invalid_call";
+    } else {
+      assert(
+          prohibitInvoke == ProhibitInvoke::Construct &&
+          "Unknown prohibitInvoke");
+      // If construct calls are prohibited, then we jump to throwInvalidInvoke
+      // if new.target is not undefined.
+      throwInvalidInvokeLab = a.newNamedLabel("throwInvalidConstruct");
+      a.b_ne(throwInvalidInvokeLab);
+
+      slowCall = _sh_throw_invalid_construct;
+      slowCallName = "_sh_throw_invalid_construct";
+    }
+
+    slowPaths_.push_back(
+        {.slowPathLab = throwInvalidInvokeLab,
+         .slowCall = (void *)slowCall,
+         .slowCallName = slowCallName,
+         .emit = [](Emitter &em, SlowPath &sl) {
+           em.comment("// Slow path: %s", sl.slowCallName);
+           em.a.bind(sl.slowPathLab);
+           em.a.mov(a64::x0, xRuntime);
+           // We don't register a thunk since there will only be a single call
+           // to this. Note that we also don't save the IP, because this is
+           // being thrown in the caller's context.
+           em.callWithoutThunk(sl.slowCall, sl.slowCallName);
+           // Function does not return.
+         }});
+  }
+
+  // NOTE: Unlike _sh_enter, we do not push an SHLocals object.
   //  SHLegacyValue *frame = _sh_enter(shr, &locals.head, 13);
   comment("// _sh_enter");
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, a64::sp);
-  // _sh_enter expects the number of registers to include any extra registers at
-  // the start of the frame.
-  a.mov(a64::w2, numFrameRegs + hbc::StackFrameLayout::FirstLocal);
-  // Like _sh_check_native_stack_overflow, we do not save the IP here so that
-  // thrown exceptions appear in the caller.
-  EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-      *this, SHLegacyValue * (*)(SHRuntime *, SHLocals *, uint32_t), _sh_enter);
-  comment("// xFrame");
-  a.mov(xFrame, a64::x0);
+  asmjit::Label registerOverflowLab = newSlowPathLabel();
 
-  //  locals.head.count = 0;
-  comment("// locals.head.count = 0");
-  a.mov(a64::w1, 0);
-  a.str(a64::w1, a64::Mem(a64::sp, offsetof(SHLocals, count)));
+  // Compute the remaining available stack space:
+  // runtime.registerStackEnd_ - runtime.stackPointer_
+  a.ldr(a64::x0, a64::Mem(xRuntime, offsetof(Runtime, registerStackEnd_)));
+  a.sub(a64::x0, a64::x0, xFrame);
+  // Check if we need more registers than remain.
+  size_t totalRegsToAlloc = numFrameRegs + hbc::StackFrameLayout::FirstLocal;
+  size_t regAllocSize = totalRegsToAlloc * sizeof(SHLegacyValue);
+  // NOTE: cmp has the same immediate field type as add/sub, so we can use the
+  // same utility function.
+  if (a64::Utils::isAddSubImm(regAllocSize)) {
+    a.cmp(a64::x0, regAllocSize);
+    a.b_lo(registerOverflowLab);
+    a.add(a64::x0, xFrame, regAllocSize);
+  } else {
+    a.mov(a64::x1, regAllocSize);
+    a.cmp(a64::x0, a64::x1);
+    a.b_lo(registerOverflowLab);
+    a.add(a64::x0, xFrame, a64::x1);
+  }
+
+  // Advance the register stack.
+  a.str(a64::x0, a64::Mem(xRuntime, offsetof(Runtime, stackPointer_)));
+  a.str(xFrame, a64::Mem(xRuntime, offsetof(Runtime, currentFrame_)));
+
+  // Fill it with undefined.
+  a.mov(a64::x0, _sh_ljs_undefined().raw);
+  a.dup(a64::v0.d2(), a64::x0);
+  // Initialize the pointer to the current set of registers.
+  a.mov(a64::x0, xFrame);
+  size_t regsToFill = totalRegsToAlloc;
+  // Fill the registers with undefined in groups of 4, then 2, then 1.
+  // If there are more than 32 registers, start with a loop.
+  if (regsToFill > 32) {
+    // We will fill 4 registers on each iteration.
+    unsigned loopBytes = llvh::alignDown(regsToFill, 4) * sizeof(SHLegacyValue);
+    // Initialize the loop limit in x1.
+    if (a64::Utils::isAddSubImm(loopBytes)) {
+      a.add(a64::x1, a64::x0, loopBytes);
+    } else {
+      a.mov(a64::x1, loopBytes);
+      a.add(a64::x1, a64::x0, a64::x1);
+    }
+    asmjit::Label loop = a.newLabel();
+    a.bind(loop);
+    // Loop until we reach the limit.
+    a.stp(a64::v0, a64::v0, a64::Mem(a64::x0).post(32));
+    a.cmp(a64::x0, a64::x1);
+    a.b_lo(loop);
+
+    regsToFill %= 4;
+  } else {
+    // If the number of registers is small, just fill them directly.
+    while (regsToFill >= 4) {
+      a.stp(a64::v0, a64::v0, a64::Mem(a64::x0).post(32));
+      regsToFill -= 4;
+    }
+  }
+  // Fill any excess registers.
+  if (regsToFill >= 2) {
+    a.str(a64::v0, a64::Mem(a64::x0).post(16));
+    regsToFill -= 2;
+  }
+  if (regsToFill > 0) {
+    assert(regsToFill == 1 && "All regs must be filled");
+    a.str(a64::d0, a64::Mem(a64::x0));
+  }
+
+  // Create the slow path for throwing a register stack overflow.
+  slowPaths_.push_back(
+      {.slowPathLab = registerOverflowLab,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment("// Slow path: _sh_throw_register_stack_overflow");
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         // Do not save the IP because we have not yet set up the stack frame
+         // for this function. The exception should appear in the caller.
+         EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
+             em, void (*)(SHRuntime *), _sh_throw_register_stack_overflow);
+       }});
 
   if (dumpJitCode_ & DumpJitCode::EntryExit) {
     comment("// print entry");
@@ -598,18 +739,21 @@ void Emitter::leave() {
     EMIT_RUNTIME_CALL_WITHOUT_SAVED_IP(
         *this, void (*)(bool, const char *), _sh_print_function_entry_exit);
   }
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, a64::sp);
-  a.mov(a64::x2, xFrame);
-  // _sh_leave cannot throw or observe the IP.
-  EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-      *this, void (*)(SHRuntime *, SHLocals *, SHLegacyValue *), _sh_leave);
+  // _sh_leave(shr, &locals.head, frame);
+  // Restore the previous stack frame.
+  a.str(xFrame, a64::Mem(xRuntime, RuntimeOffsets::stackPointer));
+  a.ldr(
+      a64::x0,
+      a64::Mem(
+          xFrame,
+          StackFrameLayout::PreviousFrame * (int)sizeof(SHLegacyValue)));
+  a.str(a64::x0, a64::Mem(xRuntime, RuntimeOffsets::currentFrame));
 
-  // The return value has been stashed in x22 by ret(). Move it to the return
+  // The return value has been stashed in x21 by ret(). Move it to the return
   // register.
-  a.mov(a64::x0, a64::x22);
+  a.mov(a64::x0, a64::x21);
 
-  unsigned stackOfs = 4 * 8;
+  unsigned stackOfs = 0;
   for (unsigned i = 0; i < gpSaveCount_; i += 2, stackOfs += 16) {
     if (i + 1 < gpSaveCount_)
       a.ldp(a64::GpX(19 + i), a64::GpX(20 + i), a64::Mem(a64::sp, stackOfs));
@@ -630,7 +774,7 @@ void Emitter::leave() {
   a.add(
       a64::sp,
       a64::sp,
-      (4 + ((gpSaveCount_ + 1) & ~1) + ((vecSaveCount_ + 1) & ~1) + 2) * 8);
+      (((gpSaveCount_ + 1) & ~1) + ((vecSaveCount_ + 1) & ~1) + 2) * 8);
 
   a.ret(a64::x30);
 }
@@ -642,24 +786,17 @@ void Emitter::callThunk(void *fn, const char *name) {
 
 void Emitter::callThunkWithSavedIP(void *fn, const char *name) {
   // Save the current IP in the runtime.
-  auto ofs = codeBlock_->getOffsetOf(emittingIP);
-  loadBits64InGp(a64::x16, (uint64_t)codeBlock_->begin(), "Bytecode start");
-  if (a64::Utils::isAddSubImm(ofs)) {
-    a.add(a64::x16, a64::x16, ofs);
-  } else {
-    a.mov(a64::x17, ofs);
-    a.add(a64::x16, a64::x16, a64::x17);
-  }
+  getBytecodeIP(a64::x16);
   a.str(a64::x16, a64::Mem(xRuntime, offsetof(Runtime, currentIP_)));
 
   // Call the passed function.
   callThunk(fn, name);
 
-// Invalidate the current IP to make sure it is set before the next call.
-#ifndef NDEBUG
-  a.mov(a64::x16, Runtime::kInvalidCurrentIP);
-  a.str(a64::x16, a64::Mem(xRuntime, offsetof(Runtime, currentIP_)));
-#endif
+  if (emitAsserts_) {
+    // Invalidate the current IP to make sure it is set before the next call.
+    a.mov(a64::x16, Runtime::kInvalidCurrentIP);
+    a.str(a64::x16, a64::Mem(xRuntime, offsetof(Runtime, currentIP_)));
+  }
 }
 
 void Emitter::callWithoutThunk(void *fn, const char *name) {
@@ -994,7 +1131,10 @@ HWReg Emitter::_isFRInRegister(FR fr) {
   return {};
 }
 
-HWReg Emitter::getOrAllocFRInVecD(FR fr, bool load) {
+HWReg Emitter::getOrAllocFRInVecD(
+    FR fr,
+    bool load,
+    llvh::Optional<HWReg> preferred) {
   auto &frState = frameRegs_[fr.index()];
 
   assert(!(load && frState.regIsDirty) && "Local is dirty");
@@ -1023,7 +1163,7 @@ HWReg Emitter::getOrAllocFRInVecD(FR fr, bool load) {
   }
 
   // We have neither global nor local VecD, so we must allocate a new tmp reg.
-  HWReg hwVecD = allocTempVecD();
+  HWReg hwVecD = allocTempVecD(preferred);
   _assignAllocatedLocalHWReg(fr, hwVecD);
 
   if (load) {
@@ -1043,7 +1183,10 @@ HWReg Emitter::getOrAllocFRInVecD(FR fr, bool load) {
   return hwVecD;
 }
 
-HWReg Emitter::getOrAllocFRInGpX(FR fr, bool load) {
+HWReg Emitter::getOrAllocFRInGpX(
+    FR fr,
+    bool load,
+    llvh::Optional<HWReg> preferred) {
   auto &frState = frameRegs_[fr.index()];
 
   assert(!(load && frState.regIsDirty) && "Local is dirty");
@@ -1073,7 +1216,7 @@ HWReg Emitter::getOrAllocFRInGpX(FR fr, bool load) {
   }
 
   // We have neither global nor local GpX, so we must allocate a new tmp reg.
-  HWReg hwGpX = allocTempGpX();
+  HWReg hwGpX = allocTempGpX(preferred);
   _assignAllocatedLocalHWReg(fr, hwGpX);
 
   if (load) {
@@ -1152,6 +1295,19 @@ void Emitter::frUpdateType(FR fr, FRType type) {
   frameRegs_[fr.index()].localType = type;
 }
 
+void Emitter::getBytecodeIP(const a64::GpX &xOut) {
+  auto ofs = codeBlock_->getOffsetOf(emittingIP);
+  loadBits64InGp(xOut, (uint64_t)codeBlock_->begin(), "Bytecode start");
+  // The add instruction takes a 12 bit immediate optionally shifted by 12 bits.
+  // So we do the add as up to two 12 bit steps. Note that this means that it
+  // will currently fail on any function that is larger than 16MB.
+  auto low12Bits = ofs & llvh::maskTrailingOnes<uint32_t>(12);
+  assert(a64::Utils::isAddSubImm(low12Bits) && "immediate should be 12 bits");
+  a.add(xOut, xOut, low12Bits);
+  if (auto restBits = ofs - low12Bits)
+    a.add(xOut, xOut, restBits);
+}
+
 void Emitter::unreachable() {
   EMIT_RUNTIME_CALL(*this, void (*)(), _sh_unreachable);
 }
@@ -1173,7 +1329,7 @@ void Emitter::profilePoint(uint16_t pointIndex) {
 }
 
 void Emitter::ret(FR frValue) {
-  movHWFromFR(HWReg::gpX(22), frValue);
+  movHWFromFR(HWReg::gpX(21), frValue);
   a.b(returnLabel_);
 }
 
@@ -1370,19 +1526,22 @@ void Emitter::toNumber(FR frRes, FR frInput) {
   syncAllFRTempExcept(frRes != frInput ? frRes : FR());
   syncToFrame(frInput);
 
-  hwInput = getOrAllocFRInGpX(frInput, true);
-  a.cmp(hwInput.a64GpX(), xDoubleLim);
-  a.b_hs(slowPathLab);
+  hwInput = getOrAllocFRInVecD(frInput, true);
 
-  if (frRes != frInput) {
-    hwRes = getOrAllocFRInVecD(frRes, false);
-    movHWFromHW<false>(hwRes, hwInput);
-  } else {
-    hwRes = hwInput;
-  }
+  // We don't free frRes so that if it is the same as frThis, the register is
+  // simply persisted and we do not need to perform a move in the fast path.
+  freeAllFRTempExcept(frRes);
+  hwRes = getOrAllocFRInVecD(frRes, false);
   frUpdatedWithHW(frRes, hwRes, FRType::Number);
 
-  freeAllFRTempExcept(frRes);
+  // Since HermesValue is NaN-boxed we know that all non-number values will be
+  // NaN. So we can conveniently test for non-number values by checking for NaN
+  // (which does not compare equal to itself).
+  static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+  a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
+  a.b_ne(slowPathLab);
+  movHWFromHW<false>(hwRes, hwInput);
+
   a.bind(contLab);
 
   slowPaths_.push_back(
@@ -1420,19 +1579,22 @@ void Emitter::toNumeric(FR frRes, FR frInput) {
   syncAllFRTempExcept(frRes != frInput ? frRes : FR());
   syncToFrame(frInput);
 
-  hwInput = getOrAllocFRInGpX(frInput, true);
-  a.cmp(hwInput.a64GpX(), xDoubleLim);
-  a.b_hs(slowPathLab);
+  hwInput = getOrAllocFRInVecD(frInput, true);
 
-  if (frRes != frInput) {
-    hwRes = getOrAllocFRInVecD(frRes, false);
-    movHWFromHW<false>(hwRes, hwInput);
-  } else {
-    hwRes = hwInput;
-  }
+  // We don't free frRes so that if it is the same as frThis, the register is
+  // simply persisted and we do not need to perform a move in the fast path.
+  freeAllFRTempExcept(frRes);
+  hwRes = getOrAllocFRInVecD(frRes, false);
   frUpdatedWithHW(frRes, hwRes, FRType::UnknownPtr);
 
-  freeAllFRTempExcept(frRes);
+  // Since HermesValue is NaN-boxed we know that all non-number values will be
+  // NaN. So we can conveniently test for non-number values by checking for NaN
+  // (which does not compare equal to itself).
+  static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+  a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
+  a.b_ne(slowPathLab);
+  movHWFromHW<false>(hwRes, hwInput);
+
   a.bind(contLab);
 
   slowPaths_.push_back(
@@ -2216,41 +2378,98 @@ void Emitter::selectObject(FR frRes, FR frThis, FR frConstructed) {
 
 void Emitter::loadThisNS(FR frRes) {
   comment("// LoadThisNS r%u", frRes.index());
-
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
   syncAllFRTempExcept(frRes);
   freeAllFRTempExcept({});
 
-  a.mov(a64::x0, xRuntime);
-  a.ldur(
-      a64::x1,
-      a64::Mem(
-          xFrame, (int)StackFrameLayout::ThisArg * (int)sizeof(SHLegacyValue)));
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue),
-      _sh_ljs_coerce_this_ns);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  HWReg hwTemp = allocTempGpX();
+  freeReg(hwTemp);
 
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  // Load the ThisArg from the stack.
+  a.ldur(
+      hwRes.a64GpX(),
+      a64::Mem(xFrame, StackFrameLayout::ThisArg * (int)sizeof(SHLegacyValue)));
+  // If it is an object, we are done.
+  emit_sh_ljs_is_object(a, hwTemp.a64GpX(), hwRes.a64GpX());
+  a.b_ne(slowPathLab);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .hwRes = hwRes,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: LoadThisNS r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em.a.ldur(
+             a64::x1,
+             a64::Mem(
+                 xFrame,
+                 StackFrameLayout::ThisArg * (int)sizeof(SHLegacyValue)));
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, SHLegacyValue),
+             _sh_ljs_coerce_this_ns);
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::coerceThisNS(FR frRes, FR frThis) {
   comment("// CoerceThisNS r%u, r%u", frRes.index(), frThis.index());
+  asmjit::Label slowPathLab = newSlowPathLabel();
+  asmjit::Label contLab = newContLabel();
+  HWReg hwThis = getOrAllocFRInGpX(frThis, true);
 
   syncAllFRTempExcept(frRes);
-  freeAllFRTempExcept({});
+  // We don't free frRes so that if it is the same as frThis, the register is
+  // simply persisted and we do not need to perform a move in the fast path.
+  freeAllFRTempExcept(frRes);
 
-  a.mov(a64::x0, xRuntime);
-  movHWFromFR(HWReg::gpX(1), frThis);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue),
-      _sh_ljs_coerce_this_ns);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+  frUpdatedWithHW(frRes, hwRes, FRType::Pointer);
+  HWReg hwTemp = allocTempGpX();
+  freeReg(hwTemp);
+  // If the operand is an object, we are done, otherwise, go to the slow path.
+  emit_sh_ljs_is_object(a, hwTemp.a64GpX(), hwThis.a64GpX());
+  a.b_ne(slowPathLab);
 
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  movHWFromHW<false>(hwRes, hwThis);
+
+  a.bind(contLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .frInput1 = frThis,
+       .hwRes = hwRes,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: CoerceThis r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em._loadFrame(HWReg(a64::x1), sl.frInput1);
+         EMIT_RUNTIME_CALL(
+             em,
+             SHLegacyValue(*)(SHRuntime *, SHLegacyValue),
+             _sh_ljs_coerce_this_ns);
+         em.movHWFromHW<false>(sl.hwRes, HWReg::gpX(0));
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::debugger() {
@@ -3262,21 +3481,6 @@ void Emitter::emitSlowPaths() {
     slowPaths_.pop_front();
   }
   emittingIP = nullptr;
-
-  auto prohibitInvoke = codeBlock_->getHeaderFlags().prohibitInvoke;
-  if (prohibitInvoke != ProhibitInvoke::None) {
-    a.bind(throwInvalidInvoke_);
-    // We don't register a thunk since there will only be a single call to this.
-    // Note that we also don't save the IP, because this is being thrown in the
-    // caller's context.
-    // This is thrown at the start of the function, so runtime is already in x0.
-    if (prohibitInvoke == ProhibitInvoke::Call)
-      EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-          *this, void (*)(SHRuntime *), _sh_throw_invalid_call);
-    else
-      EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-          *this, void (*)(SHRuntime *), _sh_throw_invalid_construct);
-  }
 }
 
 void Emitter::emitThunks() {
@@ -3303,8 +3507,7 @@ void Emitter::emitROData() {
   }
 }
 
-void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
-  comment("// Call r%u, r%u, %u", frRes.index(), frCallee.index(), argc);
+void Emitter::callImpl(FR frRes, FR frCallee) {
   uint32_t nRegs = frameRegs_.size();
 
   FR calleeFrameArg{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
@@ -3320,26 +3523,12 @@ void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
         calleeFrameArg, calleeReg, frameRegs_[frCallee.index()].localType);
   }
 
-  // Store undefined as the new target.
-  FR ntFrameArg{nRegs + hbc::StackFrameLayout::NewTarget};
-  loadConstBits64(
-      ntFrameArg, _sh_ljs_undefined().raw, FRType::UnknownNonPtr, "undefined");
-
 #ifndef NDEBUG
   // No need to sync the set up call stack to the frame memory,
   // because it these registers can't have global registers.
-  assert(
-      !frameRegs_[calleeFrameArg.index()].globalReg &&
-      "frame regs are not number/non-pointer so can't have global reg");
-  assert(
-      !frameRegs_[ntFrameArg.index()].globalReg &&
-      "frame regs are not number/non-pointer so can't have global reg");
-
-  // No need to sync the set up call stack to the frame memory,
-  // because it these registers can't have global registers.
-  for (uint32_t i = 0; i < argc; ++i) {
+  for (uint32_t i = 0; i < StackFrameLayout::CallerExtraRegistersAtEnd; ++i) {
     assert(
-        !frameRegs_[nRegs + hbc::StackFrameLayout::ThisArg - i].globalReg &&
+        !frameRegs_[nRegs - i - 1].globalReg &&
         "frame regs are not number/non-pointer so can't have global reg");
   }
 #endif
@@ -3349,14 +3538,41 @@ void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
 
   a.mov(a64::x0, xRuntime);
   a.mov(a64::x1, xFrame);
-  a.mov(a64::w2, argc - 1);
   EMIT_RUNTIME_CALL(
       *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
+      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *),
       _jit_dispatch_call);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+}
+
+void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
+  comment("// Call r%u, r%u, %u", frRes.index(), frCallee.index(), argc);
+  uint32_t nRegs = frameRegs_.size();
+
+  // Store undefined as the new target.
+  FR ntFrameArg{nRegs + hbc::StackFrameLayout::NewTarget};
+  loadConstBits64(
+      ntFrameArg, _sh_ljs_undefined().raw, FRType::UnknownNonPtr, "undefined");
+
+  FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
+  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  // The bytecode arg count includes "this", but the frame one does not, so
+  // subtract 1.
+  loadConstBits64(argcFrameArg, argc - 1, FRType::OtherNonPtr, "argCount");
+
+#ifndef NDEBUG
+  // No need to sync the set up call stack to the frame memory,
+  // because it these registers can't have global registers.
+  for (uint32_t i = 0; i < argc; ++i) {
+    assert(
+        !frameRegs_[nRegs + hbc::StackFrameLayout::ThisArg - i].globalReg &&
+        "frame regs are not number/non-pointer so can't have global reg");
+  }
+#endif
+
+  callImpl(frRes, frCallee);
 }
 
 void Emitter::callN(FR frRes, FR frCallee, llvh::ArrayRef<FR> args) {
@@ -3366,18 +3582,6 @@ void Emitter::callN(FR frRes, FR frCallee, llvh::ArrayRef<FR> args) {
       frRes.index(),
       frCallee.index());
   uint32_t nRegs = frameRegs_.size();
-
-  FR calleeFrameArg{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
-  // Store the callee to the right location in the frame.
-  if (frCallee != calleeFrameArg) {
-    // Free any temp register before we mov into it so movFRFromHW stores
-    // directly to the frame.
-    freeFRTemp(calleeFrameArg);
-    auto calleeReg = getOrAllocFRInAnyReg(frCallee, true);
-    movFRFromHW(
-        calleeFrameArg, calleeReg, frameRegs_[frCallee.index()].localType);
-  }
-  syncToFrame(calleeFrameArg);
 
   for (uint32_t i = 0; i < args.size(); ++i) {
     auto argLoc = FR{nRegs + hbc::StackFrameLayout::ThisArg - i};
@@ -3400,21 +3604,14 @@ void Emitter::callN(FR frRes, FR frCallee, llvh::ArrayRef<FR> args) {
       ntFrameArg, _sh_ljs_undefined().raw, FRType::UnknownNonPtr, "undefined");
   syncToFrame(ntFrameArg);
 
-  // For now we sync all registers, since we skip writing to the frame in some
-  // cases above, but in principle, we could track frRes specially.
-  syncAllFRTempExcept(FR());
-  freeAllFRTempExcept({});
+  FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
+  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  // The bytecode arg count includes "this", but the frame one does not, so
+  // subtract 1.
+  loadConstBits64(
+      argcFrameArg, args.size() - 1, FRType::OtherNonPtr, "argCount");
 
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, xFrame);
-  a.mov(a64::w2, args.size() - 1);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _jit_dispatch_call);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  callImpl(frRes, frCallee);
 }
 
 void Emitter::callBuiltin(FR frRes, uint32_t builtinIndex, uint32_t argc) {
@@ -3469,17 +3666,6 @@ void Emitter::callWithNewTarget(
       argc);
   uint32_t nRegs = frameRegs_.size();
 
-  auto calleeFrameArg = FR{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
-  // Store the callee to the right location in the frame.
-  if (calleeFrameArg != frCallee) {
-    // Free any temp register before we mov into it so movFRFromHW stores
-    // directly to the frame.
-    freeFRTemp(calleeFrameArg);
-    auto calleeReg = getOrAllocFRInAnyReg(frCallee, true);
-    movFRFromHW(
-        calleeFrameArg, calleeReg, frameRegs_[frCallee.index()].localType);
-  }
-
   FR ntFrameArg{nRegs + hbc::StackFrameLayout::NewTarget};
   // Store the new target to the right location in the frame.
   if (ntFrameArg != frNewTarget) {
@@ -3491,6 +3677,12 @@ void Emitter::callWithNewTarget(
         ntFrameArg, newTargetReg, frameRegs_[frNewTarget.index()].localType);
   }
 
+  FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
+  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  // The bytecode arg count includes "this", but the frame one does not, so
+  // subtract 1.
+  loadConstBits64(argcFrameArg, argc - 1, FRType::OtherNonPtr, "argCount");
+
 #ifndef NDEBUG
   // No need to sync the set up call stack to the frame memory,
   // because it these registers can't have global registers.
@@ -3499,28 +3691,9 @@ void Emitter::callWithNewTarget(
         !frameRegs_[nRegs + hbc::StackFrameLayout::ThisArg - i].globalReg &&
         "frame regs are not number/non-pointer so can't have global reg");
   }
-
-  assert(
-      !frameRegs_[calleeFrameArg.index()].globalReg &&
-      "frame regs are not number/non-pointer so can't have global reg");
-  assert(
-      !frameRegs_[ntFrameArg.index()].globalReg &&
-      "frame regs are not number/non-pointer so can't have global reg");
 #endif
 
-  syncAllFRTempExcept({});
-  freeAllFRTempExcept(frRes);
-
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, xFrame);
-  a.mov(a64::w2, argc - 1);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _jit_dispatch_call);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  callImpl(frRes, frCallee);
 }
 
 void Emitter::callWithNewTargetLong(
@@ -3536,17 +3709,6 @@ void Emitter::callWithNewTargetLong(
       frArgc.index());
   uint32_t nRegs = frameRegs_.size();
 
-  auto calleeFrameArg = FR{nRegs + hbc::StackFrameLayout::CalleeClosureOrCB};
-  // Store the callee to the right location in the frame.
-  if (calleeFrameArg != frCallee) {
-    // Free any temp register before we mov into it so movFRFromHW stores
-    // directly to the frame.
-    freeFRTemp(calleeFrameArg);
-    auto calleeReg = getOrAllocFRInAnyReg(frCallee, true);
-    movFRFromHW(
-        calleeFrameArg, calleeReg, frameRegs_[frCallee.index()].localType);
-  }
-
   FR ntFrameArg{nRegs + hbc::StackFrameLayout::NewTarget};
   // Store the new target to the right location in the frame.
   if (ntFrameArg != frNewTarget) {
@@ -3558,29 +3720,18 @@ void Emitter::callWithNewTargetLong(
         ntFrameArg, newTargetReg, frameRegs_[frNewTarget.index()].localType);
   }
 
-  syncToFrame(calleeFrameArg);
-  syncToFrame(ntFrameArg);
-
   HWReg hwArgc = getOrAllocFRInVecD(frArgc, true);
-  HWReg hwTemp = allocTempGpX(HWReg::gpX(2));
-  freeReg(hwTemp);
-  a.fcvtzu(hwTemp.a64GpX(), hwArgc.a64VecD());
+  FR argcFrameArg{nRegs + hbc::StackFrameLayout::ArgCount};
+  HWReg hwArgcArg = getOrAllocFRInGpX(argcFrameArg, false);
+  frUpdatedWithHW(argcFrameArg, hwArgcArg, FRType::OtherNonPtr);
 
-  syncAllFRTempExcept({});
-  freeAllFRTempExcept(frRes);
-
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, xFrame);
-  // The bytecode arg count includes "this", but the SH one does not, so
+  static_assert(HERMESVALUE_VERSION == 1, "Native u32 must not need encoding");
+  a.fcvtzu(hwArgcArg.a64GpX(), hwArgc.a64VecD());
+  // The bytecode arg count includes "this", but the frame one does not, so
   // subtract 1.
-  a.sub(a64::w2, hwTemp.a64GpX().w(), 1);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, uint32_t),
-      _jit_dispatch_call);
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
+  a.sub(hwArgcArg.a64GpX(), hwArgcArg.a64GpX(), 1);
+
+  callImpl(frRes, frCallee);
 }
 
 void Emitter::getBuiltinClosure(FR frRes, uint32_t builtinIndex) {
@@ -3628,20 +3779,19 @@ void Emitter::arithUnop(
     inputIsNum = isFRKnownNumber(frInput);
   }
 
+  hwInput = getOrAllocFRInVecD(frInput, true);
   if (!inputIsNum) {
     slowPathLab = newSlowPathLabel();
     contLab = newContLabel();
     syncAllFRTempExcept(frRes != frInput ? frRes : FR());
     syncToFrame(frInput);
-  }
 
-  if (inputIsNum) {
-    hwInput = getOrAllocFRInVecD(frInput, true);
-  } else {
-    hwInput = getOrAllocFRInGpX(frInput, true);
-    a.cmp(hwInput.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-    hwInput = getOrAllocFRInVecD(frInput, true);
+    // Since HermesValue is NaN-boxed we know that all non-number values will be
+    // NaN. So we can conveniently test for non-number values by checking for
+    // NaN (which does not compare equal to itself).
+    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    a.fcmp(hwInput.a64VecD(), hwInput.a64VecD());
+    a.b_ne(slowPathLab);
   }
 
   hwRes = getOrAllocFRInVecD(frRes, false);
@@ -3912,15 +4062,17 @@ void Emitter::mod(bool forceNumber, FR frRes, FR frLeft, FR frRight) {
     syncToFrame(frRight);
   }
 
-  if (!leftIsNum) {
-    hwLeft = getOrAllocFRInGpX(frLeft, true);
-    a.cmp(hwLeft.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-  if (!rightIsNum) {
-    hwRight = getOrAllocFRInGpX(frRight, true);
-    a.cmp(hwRight.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
+  hwLeft = getOrAllocFRInVecD(frLeft, true);
+  hwRight = getOrAllocFRInVecD(frRight, true);
+
+  if (slow) {
+    // Since HermesValue is NaN-boxed we know that all non-number values will be
+    // NaN. So we can conveniently test for non-number values by checking for
+    // NaN. We can do that with the VS condition code, which is set if either
+    // operand to fcmp is NaN.
+    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
+    a.b_vs(slowPathLab);
   }
 
   // Make sure d0, d1 are unused.
@@ -4003,43 +4155,36 @@ void Emitter::arithBinOp(
     slow = !(rightIsNum && leftIsNum);
   }
 
+  hwLeft = getOrAllocFRInVecD(frLeft, true);
+  hwRight = getOrAllocFRInVecD(frRight, true);
+
   if (slow) {
     slowPathLab = newSlowPathLabel();
     contLab = newContLabel();
     syncAllFRTempExcept(frRes != frLeft && frRes != frRight ? frRes : FR());
     syncToFrame(frLeft);
     syncToFrame(frRight);
+    freeAllFRTempExcept({});
   }
-
-  if (leftIsNum) {
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  } else {
-    hwLeft = getOrAllocFRInGpX(frLeft, true);
-    a.cmp(hwLeft.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-  if (rightIsNum) {
-    hwRight = getOrAllocFRInVecD(frRight, true);
-  } else {
-    hwRight = getOrAllocFRInGpX(frRight, true);
-    a.cmp(hwRight.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-
-  if (!leftIsNum)
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  if (!rightIsNum)
-    hwRight = getOrAllocFRInVecD(frRight, true);
 
   hwRes = getOrAllocFRInVecD(frRes, false);
-  fast(a, hwRes.a64VecD(), hwLeft.a64VecD(), hwRight.a64VecD());
-
   frUpdatedWithHW(frRes, hwRes, !slow ? FRType::Number : FRType::UnknownPtr);
+
+  if (slow) {
+    // Since HermesValue is NaN-boxed we know that all non-number values will be
+    // NaN. So we can conveniently test for non-number values by checking for
+    // NaN. We can do that with the VS condition code, which is set if either
+    // operand to fcmp is NaN.
+    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
+    a.b_vs(slowPathLab);
+  }
+
+  fast(a, hwRes.a64VecD(), hwLeft.a64VecD(), hwRight.a64VecD());
 
   if (!slow)
     return;
 
-  freeAllFRTempExcept(frRes);
   a.bind(contLab);
 
   slowPaths_.push_back(
@@ -4286,26 +4431,11 @@ void Emitter::jCond(
   // Do this always, since this could be the end of the BB.
   syncAllFRTempExcept(FR());
 
-  if (leftIsNum) {
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  } else {
-    hwLeft = getOrAllocFRInGpX(frLeft, true);
-    a.cmp(hwLeft.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-  if (rightIsNum) {
-    hwRight = getOrAllocFRInVecD(frRight, true);
-  } else {
-    hwRight = getOrAllocFRInGpX(frRight, true);
-    a.cmp(hwRight.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
+  hwLeft = getOrAllocFRInVecD(frLeft, true);
+  hwRight = getOrAllocFRInVecD(frRight, true);
 
-  if (!leftIsNum)
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  if (!rightIsNum)
-    hwRight = getOrAllocFRInVecD(frRight, true);
-
+  // Do the comparison before checking for a number. If the result is true, we
+  // know that these cannot be NaN, and therefore must be numbers.
   a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
   if (!invert) {
     fast(a, target);
@@ -4313,8 +4443,20 @@ void Emitter::jCond(
     if (!contLab.isValid())
       contLab = a.newLabel();
     fast(a, contLab);
-    a.b(target);
   }
+
+  if (slow) {
+    // Since HermesValue is NaN-boxed we know that all non-number values will be
+    // NaN. So we can conveniently test for non-number values by checking for
+    // NaN. We can do that with the VS condition code, which is set if either
+    // operand to fcmp is NaN.
+    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    a.b_vs(slowPathLab);
+  }
+
+  if (invert)
+    a.b(target);
+
   if (contLab.isValid())
     a.bind(contLab);
 
@@ -4386,41 +4528,31 @@ void Emitter::compareImpl(
   rightIsNum = isFRKnownNumber(frRight);
   slow = !(rightIsNum && leftIsNum);
 
+  hwLeft = getOrAllocFRInVecD(frLeft, true);
+  hwRight = getOrAllocFRInVecD(frRight, true);
   if (slow) {
     slowPathLab = newSlowPathLabel();
     contLab = newContLabel();
     syncAllFRTempExcept(frRes != frLeft && frRes != frRight ? frRes : FR());
     syncToFrame(frLeft);
     syncToFrame(frRight);
-  }
-
-  if (leftIsNum) {
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  } else {
-    hwLeft = getOrAllocFRInGpX(frLeft, true);
-    a.cmp(hwLeft.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-  if (rightIsNum) {
-    hwRight = getOrAllocFRInVecD(frRight, true);
-  } else {
-    hwRight = getOrAllocFRInGpX(frRight, true);
-    a.cmp(hwRight.a64GpX(), xDoubleLim);
-    a.b_hs(slowPathLab);
-  }
-
-  if (!leftIsNum)
-    hwLeft = getOrAllocFRInVecD(frLeft, true);
-  if (!rightIsNum)
-    hwRight = getOrAllocFRInVecD(frRight, true);
-  if (slow)
     freeAllFRTempExcept({});
+  }
 
-  HWReg hwRes = slow ? getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0))
-                     : getOrAllocFRInGpX(frRes, false);
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false, HWReg::gpX(0));
   a64::GpX xRes = hwRes.a64GpX();
 
   a.fcmp(hwLeft.a64VecD(), hwRight.a64VecD());
+
+  if (slow) {
+    // Since HermesValue is NaN-boxed we know that all non-number values will be
+    // NaN. So we can conveniently test for non-number values by checking for
+    // NaN. We can do that with the VS condition code, which is set if either
+    // operand to fcmp is NaN.
+    static_assert(HERMESVALUE_VERSION == 1, "Non-numbers must be NaN");
+    a.b_vs(slowPathLab);
+  }
+
   // Store the result of the comparison in the lowest bit of tmpCmpRes.
   // asmjit will convert CondCode to the correct encoding for use in the opcode.
   a.cset(xRes, condCode);

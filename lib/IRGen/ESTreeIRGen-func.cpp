@@ -188,7 +188,7 @@ NormalFunction *ESTreeIRGen::genCapturingFunction(
       functionNode->getSemInfo()->customDirectives,
       functionNode->getSourceRange());
 
-  if (auto *functionType = llvh::dyn_cast<flow::TypedFunctionType>(
+  if (llvh::isa<flow::TypedFunctionType>(
           flowContext_.getNodeTypeOrAny(functionNode)->info)) {
     newFunc->getAttributesRef(Mod).typed = true;
   }
@@ -271,7 +271,7 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
             functionNode->getSourceRange(),
             /* insertBefore */ nullptr));
 
-  if (auto *functionType = llvh::dyn_cast<flow::TypedFunctionType>(
+  if (llvh::isa<flow::TypedFunctionType>(
           flowContext_.getNodeTypeOrAny(functionNode)->info)) {
     newFunction->getAttributesRef(Mod).typed = true;
   }
@@ -376,7 +376,7 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
       // If we're compiling a constructor with no superclass, emit the
       // field inits at the start.
       if (typedClassContext.node->_superClass == nullptr) {
-        emitFieldInitCall(typedClassContext.type);
+        emitTypedFieldInitCall(typedClassContext.type);
       }
     }
 
@@ -1097,7 +1097,7 @@ Function *ESTreeIRGen::genFieldInitFunction() {
       if (auto *prop = llvh::dyn_cast<ESTree::ClassPropertyNode>(&it)) {
         if (prop->_value) {
           Value *value = genExpression(prop->_value);
-          emitFieldStore(
+          emitTypedFieldStore(
               typedClassContext.type, prop->_key, genThisExpression(), value);
         }
       }
@@ -1111,7 +1111,7 @@ Function *ESTreeIRGen::genFieldInitFunction() {
   return initFunc;
 }
 
-void ESTreeIRGen::emitCreateFieldInitFunction() {
+void ESTreeIRGen::emitCreateTypedFieldInitFunction() {
   Function *initFunc = genFieldInitFunction();
   if (initFunc == nullptr) {
     return;
@@ -1135,7 +1135,7 @@ void ESTreeIRGen::emitCreateFieldInitFunction() {
   classInfo.fieldInitFunctionVar = fieldInitFuncVar;
 }
 
-void ESTreeIRGen::emitFieldInitCall(flow::ClassType *classType) {
+void ESTreeIRGen::emitTypedFieldInitCall(flow::ClassType *classType) {
   auto iter = classFieldInitInfo_.find(classType);
   if (iter == classFieldInitInfo_.end()) {
     return;

@@ -262,7 +262,7 @@ class HBCISel {
 unsigned HBCISel::encodeValue(Value *value) {
   if (auto *I = llvh::dyn_cast<Instruction>(value)) {
     assert(I->hasOutput() && "Instruction has no output");
-    return RA_.getRegister(I).getIndex();
+    return RA_.getHVMRegisterIndex(RA_.getRegister(I));
   } else if (auto *var = llvh::dyn_cast<Variable>(value)) {
     return var->getIndexInVariableList();
   } else {
@@ -580,8 +580,7 @@ void HBCISel::emitMovIfNeeded(param_t dest, param_t src) {
 
 void HBCISel::verifyCall(BaseCallInst *Inst) {
 #ifndef NDEBUG
-  const auto lastArgReg = RA_.getLastRegister().getIndex() -
-      HVMRegisterAllocator::CALL_EXTRA_REGISTERS;
+  const auto lastArgReg = RA_.lastCallArgRegister();
 
   const bool isBuiltin = llvh::isa<CallBuiltinInst>(Inst);
   const bool isCallN = llvh::isa<HBCCallNInst>(Inst);
@@ -600,13 +599,16 @@ void HBCISel::verifyCall(BaseCallInst *Inst) {
       // the last register, not the count of registers.
       assert(
           llvh::isa<Instruction>(argument) &&
-          RA_.getRegister(argument).getIndex() <= lastArgReg - max);
+          RA_.getHVMRegisterIndex(RA_.getRegister(argument)) <=
+              RA_.getHVMRegisterIndex(lastArgReg) - max &&
+          "Register is misallocated");
     } else {
       // Calls require that the arguments be at the end of the frame, in reverse
       // order.
       assert(
           llvh::isa<Instruction>(argument) &&
-          RA_.getRegister(argument).getIndex() == lastArgReg - i &&
+          RA_.getHVMRegisterIndex(RA_.getRegister(argument)) <=
+              RA_.getHVMRegisterIndex(lastArgReg) - i &&
           "Register is misallocated");
     }
   }
@@ -1318,16 +1320,16 @@ void HBCISel::generateHBCCompareBranchInst(
       break;
     case ValueKind::CmpBrGreaterThanInstKind: // >
       loc = invert
-          ? (isBothNumber ? BCFGen_->emitJNotGreaterNLong(0, left, right)
+          ? (isBothNumber ? BCFGen_->emitJNotLessNLong(0, right, left)
                           : BCFGen_->emitJNotGreaterLong(0, left, right))
-          : (isBothNumber ? BCFGen_->emitJGreaterNLong(0, left, right)
+          : (isBothNumber ? BCFGen_->emitJLessNLong(0, right, left)
                           : BCFGen_->emitJGreaterLong(0, left, right));
       break;
     case ValueKind::CmpBrGreaterThanOrEqualInstKind: // >=
       loc = invert
-          ? (isBothNumber ? BCFGen_->emitJNotGreaterEqualNLong(0, left, right)
+          ? (isBothNumber ? BCFGen_->emitJNotLessEqualNLong(0, right, left)
                           : BCFGen_->emitJNotGreaterEqualLong(0, left, right))
-          : (isBothNumber ? BCFGen_->emitJGreaterEqualNLong(0, left, right)
+          : (isBothNumber ? BCFGen_->emitJLessEqualNLong(0, right, left)
                           : BCFGen_->emitJGreaterEqualLong(0, left, right));
       break;
 
@@ -1932,12 +1934,12 @@ void HBCISel::generateHBCFCompareBranchInst(
                    : BCFGen_->emitJLessEqualNLong(0, left, right);
       break;
     case ValueKind::HBCFCmpBrGreaterThanInstKind:
-      loc = invert ? BCFGen_->emitJNotGreaterNLong(0, left, right)
-                   : BCFGen_->emitJGreaterNLong(0, left, right);
+      loc = invert ? BCFGen_->emitJNotLessNLong(0, right, left)
+                   : BCFGen_->emitJLessNLong(0, right, left);
       break;
     case ValueKind::HBCFCmpBrGreaterThanOrEqualInstKind:
-      loc = invert ? BCFGen_->emitJNotGreaterEqualNLong(0, left, right)
-                   : BCFGen_->emitJGreaterEqualNLong(0, left, right);
+      loc = invert ? BCFGen_->emitJNotLessEqualNLong(0, right, left)
+                   : BCFGen_->emitJLessEqualNLong(0, right, left);
       break;
     default:
       hermes_fatal("invalid kind for FCompareBranchInst");
