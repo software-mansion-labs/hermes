@@ -565,7 +565,8 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   endif()
   # MSVC does not have strict aliasing so there is no need to support it.
   # Similar to GCC/Clang above, disable strict signed integer overflow.
-  append("/d2UndefIntOverflow-" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  # append("/d2UndefIntOverflow-" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -wd4146")
 endif()
 
 # Export a JSON file with the compilation commands that external tools can use
