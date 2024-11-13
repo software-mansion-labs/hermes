@@ -275,7 +275,7 @@ SHLegacyValue _jit_dispatch_call(SHRuntime *shr, SHLegacyValue *frame) {
   newFrame.getSavedCodeBlockRef() = HermesValue::encodeNativePointer(nullptr);
   newFrame.getSHLocalsRef() = HermesValue::encodeNativePointer(nullptr);
 
-  auto callTarget = newFrame.getCalleeClosureHandleUnsafe();
+  auto *callTarget = &newFrame.getCalleeClosureOrCBRef();
   if (vmisa<JSFunction>(*callTarget)) {
     JSFunction *jsFunc = vmcast<JSFunction>(*callTarget);
     if (auto *fnPtr = jsFunc->getCodeBlock()->getJITCompiled())
