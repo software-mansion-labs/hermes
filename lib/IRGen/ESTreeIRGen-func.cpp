@@ -742,7 +742,7 @@ void ESTreeIRGen::emitFunctionPrologue(
     return;
 
   emitParameters(funcNode);
-  emitScopeDeclarations(semInfo->getFunctionScope());
+  emitScopeDeclarations(semInfo->getFunctionBodyScope());
 
   // Generate the code for import declarations before generating the rest of the
   // body.
@@ -762,6 +762,7 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
       case sema::Decl::Kind::Let:
       case sema::Decl::Kind::Const:
       case sema::Decl::Kind::Class:
+      case sema::Decl::Kind::Catch:
         assert(
             ((curFunction()->debugAllowRecompileCounter != 0) ||
              (decl->customData == nullptr)) &&
@@ -894,7 +895,7 @@ void ESTreeIRGen::emitHoistedFunctionDeclaration(
   // Function-level var-scoped functions may have a previous store of
   // 'undefined', which is now dead. If this isn't a function-level scope, don't
   // try to delete anything.
-  if (scope->parentFunction->getFunctionScope() != scope)
+  if (scope->parentFunction->getFunctionBodyScope() != scope)
     return;
 
   Value *storage = getDeclData(decl);
@@ -929,7 +930,7 @@ void ESTreeIRGen::emitParameters(ESTree::FunctionLikeNode *funcNode) {
   LLVM_DEBUG(llvh::dbgs() << "IRGen function parameters.\n");
 
   // Create a variable for every parameter.
-  for (sema::Decl *decl : semInfo->getFunctionScope()->decls) {
+  for (sema::Decl *decl : semInfo->getParameterScope()->decls) {
     if (decl->kind != sema::Decl::Kind::Parameter)
       break;
 
