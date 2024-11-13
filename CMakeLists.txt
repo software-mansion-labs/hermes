@@ -563,14 +563,6 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   if (HERMES_MSVC_MP)
     add_definitions( /MP )
   endif()
-  # MSVC does not have strict aliasing so there is no need to support it.
-  # Similar to GCC/Clang above, disable strict signed integer overflow.
-  # append(" /d2UndefIntOverflow-" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
-
-  # string(APPEND CMAKE_C_FLAGS " -d2UndefIntOverflow-")
-  # string(APPEND CMAKE_CXX_FLAGS " -d2UndefIntOverflow-")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++20")
-  add_compile_options(/std:c++20)
 endif()
 
 # Export a JSON file with the compilation commands that external tools can use
@@ -716,7 +708,13 @@ if(HERMES_IS_ANDROID)
   find_package(fbjni REQUIRED CONFIG)
 endif()
 
-set(CMAKE_CXX_STANDARD 20)
+if("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
+  # MSCV requires c++20
+  set(CMAKE_CXX_STANDARD 20)
+elseif()
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 

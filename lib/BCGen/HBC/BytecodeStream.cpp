@@ -17,12 +17,11 @@
 namespace hermes {
 namespace hbc {
 
-
-
 namespace {
 
 class BytecodeSerializer {
-  friend void hermes::hbc::visitBytecodeSegmentsInOrder<BytecodeSerializer>(BytecodeSerializer &);
+  friend void hermes::hbc::visitBytecodeSegmentsInOrder
+    <BytecodeSerializer>(BytecodeSerializer &);
   /// Output Stream
   llvh::raw_ostream &os_;
   // Module being serialized.
