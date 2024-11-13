@@ -21,7 +21,7 @@ namespace {
 
 class BytecodeSerializer {
   friend void visitBytecodeSegmentsInOrder<BytecodeSerializer>(
-      BytecodeSerializer &);
+      BytecodeSerializer &) {}
 
   /// Output Stream
   llvh::raw_ostream &os_;
