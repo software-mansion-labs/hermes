@@ -567,8 +567,8 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   # Similar to GCC/Clang above, disable strict signed integer overflow.
   # append("/d2UndefIntOverflow-" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
 
-  string(APPEND CMAKE_C_FLAGS " /d2UndefIntOverflow")
-  string(APPEND CMAKE_CXX_FLAGS " /d2UndefIntOverflow")
+  string(APPEND CMAKE_C_FLAGS " -d2UndefIntOverflow-")
+  string(APPEND CMAKE_CXX_FLAGS " -d2UndefIntOverflow-")
 endif()
 
 # Export a JSON file with the compilation commands that external tools can use
