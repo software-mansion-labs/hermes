@@ -570,6 +570,7 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   # string(APPEND CMAKE_C_FLAGS " -d2UndefIntOverflow-")
   # string(APPEND CMAKE_CXX_FLAGS " -d2UndefIntOverflow-")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++20")
+  add_compile_options(/std:c++20)
 endif()
 
 # Export a JSON file with the compilation commands that external tools can use
@@ -715,7 +716,7 @@ if(HERMES_IS_ANDROID)
   find_package(fbjni REQUIRED CONFIG)
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
