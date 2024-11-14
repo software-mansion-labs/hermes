@@ -1,78 +1,59 @@
-# Static Hermes for React Native – Experimental Builds
+# Hermes JS Engine
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/facebook/hermes/blob/HEAD/LICENSE)
+[![npm version](https://img.shields.io/npm/v/hermes-engine.svg?style=flat)](https://www.npmjs.com/package/hermes-engine)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/facebook/hermes/blob/HEAD/CONTRIBUTING.md)
+<img src="./doc/img/logo.svg" alt="Hermes logo - large H with wings" align="right" width="20%"/>
 
-> This is a fork of [Hermes](https://github.com/facebook/hermes/) repository. If you want to see the original README, head to the [upstream repository webside](https://github.com/facebook/hermes/)
+Hermes is a JavaScript engine optimized for fast start-up of [React Native](https://reactnative.dev/) apps. It features ahead-of-time static optimization and compact bytecode.
 
-This repository contains the necessary changes to build the new version of Hermes (also known as Static Hermes) for React Native open-source apps.
-We are collaborating with the Hermes team to include these changes in the main repository and eventually publish the new Hermes as part of a future React Native release.
+If you're only interested in using pre-built Hermes in a new or existing React Native app, you do not need to follow this guide or have direct access to the Hermes source. Instead, just follow [these instructions to enable Hermes](https://reactnative.dev/docs/hermes).
 
-In the meantime, you can use this repository to try out the new Hermes in your React Native project.
-Currently, only iOS is supported.
-You can build the new Hermes from source or use the pre-built package that we are distributing via the releases page on GitHub.
-Please follow the instructions below based on the approach you choose, and don't hesitate to leave feedback or report issues here or on the [Hermes](https://github.com/facebook/hermes/) repository if you encounter any crashes.
+> Noted that each Hermes release is aimed at a specific RN version. The rule of thumb is to always follow [Hermes releases](https://github.com/facebook/hermes/releases) strictly. Version mismatch can result in instant crash of your apps in the worst case scenario.
+If you want to know how to build and hack on Hermes directly, and/or integrate Hermes built from source into a React Native app then read on.
 
-If you're interested in testing the new Hermes and evaluating its impact on your app's performance, we recommend testing with release builds configured to use bytecode compilation.
-This means that instead of interpreting the bundle at runtime, the bundle is compiled into bytecode during the build process, which is then used to run your app.
+The instructions here very briefly cover steps to build the Hermes CLI. They assume you have typical native development tools setup for your OS, and support for cmake and Ninja. For more details of required dependencies, building Hermes with different options, etc. follow these links instead:
 
-The new Hermes supports running JavaScript in various "modes": as an interpreter, typed native, untyped native, typed bytecode, and untyped bytecode.
-The best performance is achieved when running typed code, meaning that instead of compiling JavaScript, Hermes takes a typed source (TypeScript or Flow) as input.
-However, with the current React Native setup, it is not yet possible to generate a typed bundle, so only untyped code can be provided to the compiler.
-When following the instructions in this repository, your app will run in interpreter mode for Debug builds or in untyped bytecode mode for Release builds.
+* [Building and Running Hermes](doc/BuildingAndRunning.md)
+* [Using a custom Hermes build in a React Native app](doc/ReactNativeIntegration.md#using-a-custom-hermes-build-in-a-react-native-app)
 
-> [!WARNING]  
-> This project and the included pre-built packages should be treated as experimental. While Meta has announced that they have been using the new Hermes in production for some time, we do not recommend doing so until our changes are officially approved by the Hermes team.
+To build a local debug version of the Hermes CLI tools the following steps should get you started on macOS/Linux:
 
-## Use pre-built 
-
-This instruction lets you use the new Hermes without building it from sources.
-It will use the bre-built Hermes binaries that we are distributing via the releases page.
-
-### 1. Apply the below patch to `node_modules/react-native/sdks/hermes-engine/hermes-utils.rb`
-```diff
---- hermes-utils.rb
-+++ hermes-utils.rb
-@@ -204,7 +204,7 @@
- def release_tarball_url(version, build_type)
-     # Sample url from Maven:
-     # https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/0.71.0/react-native-artifacts-0.71.0-hermes-ios-debug.tar.gz
--    return "https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/#{version}/react-native-artifacts-#{version}-hermes-ios-#{build_type.to_s}.tar.gz"
-+    return "https://github.com/software-mansion-labs/hermes/releases/download/preview-v1/react-native-artifacts-hermes-ios-#{build_type.to_s}.tar.gz"
- end
- 
- def download_stable_hermes(react_native_path, version, configuration)
+```shell
+mkdir hermes_workingdir
+cd hermes_workingdir
+git clone https://github.com/facebook/hermes.git
+cmake -S hermes -B build -G Ninja
+cmake --build ./build
 ```
 
-Note that this patches files under `node_module` directory, so if you re-install node modules after this step you may lose those changes.
-If you want to commit this to version control, we recommend you use some tool like [patch-package](https://github.com/ds300/patch-package).
+Or if you're using Windows, the following should get you going in a Git Bash shell:
 
-### 2. Rebuild iOS `Pods`
-```bash
-cd ios && rm -r Pods && pod install
+```shell
+mkdir hermes_workingdir
+cd hermes_workingdir
+git -c core.autocrlf=false clone https://github.com/facebook/hermes.git
+cmake -S hermes -B build -G 'Visual Studio 16 2019' -A x64
+cmake --build ./build
 ```
 
-### 3. Build and start your app normally
+You will now be in a directory with the output of building Hermes into CLI tools. From here you can run a piece of JavaScript as follows:
 
-After this step you should be all set.
-Remember to use release builds if you want to try the untyped bytecode more of the new Hermes.
-
-## Building from source
-
-If you don't want to use the provided binaries, you can use this repo to build the new Hermes from source.
-
-### 1. Build hermes iOS framework
-```bash
-git clone git@github.com:software-mansion-labs/hermes.git
-cd hermes
-git checkout static-hermes-test
-export DEBUG=true && ./utils/build-ios-framework.sh # set DEBUG=<true|false> depend on your build type
+```shell
+echo "'use strict'; function hello() { print('Hello World'); } hello();" | ./bin/hermes
 ```
 
-### 2. Update binaries in your app
-Replace the directory `destroot` located at `YourAwesomeApp/ios/Pods/hermes-engine/destroot` in your application with the directory `hermes/destroot` that you've just built.
+## Contributing
 
-Note that because you are replacing binary files located under Pods, those could get overridden by future `pod install` calls.
-It is also likely that `Pods` folder is excluded from version control.
+The main purpose of this repository is to continue to evolve Hermes, making it faster and more efficient. We are grateful to the community for contributing bugfixes and improvements. Read below to learn how you can take part in improving Hermes.
 
-### 3. Build and start your app normally
+### Code of Conduct
 
-After this step you should be all set.
-Remember to use release builds if you want to try the untyped bytecode more of the new Hermes.
+Facebook has adopted a [Code of Conduct](./CODE_OF_CONDUCT.md) that we expect project participants to adhere to. Please read [the full text](https://code.fb.com/codeofconduct) so that you can understand what actions will and will not be tolerated.
+
+### Contributing Guide
+
+Read our [contributing guide](CONTRIBUTING.md) to learn about our development process, how to propose bugfixes and improvements, and how to build and test your changes to Hermes.
+
+### License
+
+Hermes is [MIT licensed](./LICENSE).
