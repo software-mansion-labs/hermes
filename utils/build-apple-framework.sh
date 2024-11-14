@@ -81,7 +81,8 @@ function configure_apple_framework {
     -DHERMES_ENABLE_TOOLS:BOOLEAN="$build_cli_tools" \
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DIMPORT_HOST_COMPILERS="$PWD/build_host_hermesc/ImportHostCompilers.cmake"
 }
 
 # Utility function to build an Apple framework
@@ -105,6 +106,8 @@ function build_apple_framework {
 # the architectures into an universal folder and then remove
 # the merged frameworks from destroot
 function create_universal_framework {
+  mkdir destroot/bin
+  cp build_host_hermesc/bin/{hermes,hermesc,hermes-lit} ./destroot/bin
 
   cd ./destroot/Library/Frameworks || exit 1
 
