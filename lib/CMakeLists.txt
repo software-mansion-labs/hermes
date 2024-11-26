@@ -170,7 +170,6 @@ add_library(hermesvmlean SHARED dummy.cpp)
 # Do not build a framework for the test suite.
 if(HERMES_BUILD_APPLE_FRAMEWORK)
   if(APPLE)
-    set_target_properties(hermesvm PROPERTIES OUTPUT_NAME hermes)
 
     set_target_properties(hermesvm PROPERTIES
       FRAMEWORK TRUE

@@ -48,7 +48,7 @@ function get_mac_deployment_target {
 # Build host hermes compiler for internal bytecode
 function build_host_hermesc {
   cmake -S . -B build_host_hermesc
-  cmake --build ./build_host_hermesc --target hermesc
+  cmake --build ./build_host_hermesc
 }
 
 # Utility function to configure an Apple framework
@@ -117,11 +117,11 @@ function create_universal_framework {
   echo "Creating universal framework for platforms: ${platforms[*]}"
 
   for i in "${!platforms[@]}"; do
-    args+="-framework ${platforms[$i]}/hermes.framework "
+    args+="-framework ${platforms[$i]}/hermesvm.framework "
   done
 
   mkdir universal
-  xcodebuild -create-xcframework $args -output "universal/hermes.xcframework"
+  xcodebuild -create-xcframework $args -output "universal/hermesvm.xcframework"
 
   for platform in $@; do
     rm -r "$platform"
