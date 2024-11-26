@@ -713,13 +713,12 @@ if(HERMES_IS_ANDROID)
 
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
-# if("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
-#   # MSCV requires c++20
-#   set(CMAKE_CXX_STANDARD 20)
-# else()
-#   set(CMAKE_CXX_STANDARD 17)
-# endif()
+if("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSCV")
+  # MSCV requires c++20
+  set(CMAKE_CXX_STANDARD 20)
+else()
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
