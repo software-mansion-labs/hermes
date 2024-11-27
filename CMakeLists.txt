@@ -563,9 +563,6 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   if (HERMES_MSVC_MP)
     add_definitions( /MP )
   endif()
-  # MSVC does not have strict aliasing so there is no need to support it.
-  # Similar to GCC/Clang above, disable strict signed integer overflow.
-  append("/WX /wd4293" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
 endif()
 
 # Export a JSON file with the compilation commands that external tools can use
