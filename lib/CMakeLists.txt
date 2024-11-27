@@ -220,11 +220,11 @@ endif()
 # Largely inspired by https://github.com/llvm/llvm-project/blob/6701993027f8af172d7ba697884459261b00e3c6/llvm/cmake/modules/AddLLVM.cmake#L1934-L1986
 if(HERMES_BUILD_APPLE_DSYM)
   if(CMAKE_CXX_FLAGS MATCHES "-flto")
-    set(lto_object ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/libhermes-lto.o)
-    set_property(TARGET libhermes APPEND_STRING PROPERTY LINK_FLAGS " -Wl,-object_path_lto,${lto_object}")
+    set(lto_object ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/hermesvm-lto.o)
+    set_property(TARGET hermesvm APPEND_STRING PROPERTY LINK_FLAGS " -Wl,-object_path_lto,${lto_object}")
   endif()
 
-  get_target_property(DSYM_PATH libhermes LOCATION)
+  get_target_property(DSYM_PATH hermesvm LOCATION)
   if(HERMES_BUILD_APPLE_FRAMEWORK)
     get_filename_component(DSYM_PATH ${DSYM_PATH} DIRECTORY)
   endif()
@@ -233,8 +233,8 @@ if(HERMES_BUILD_APPLE_DSYM)
   if(NOT CMAKE_DSYMUTIL)
     set(CMAKE_DSYMUTIL xcrun dsymutil)
   endif()
-  add_custom_command(TARGET libhermes POST_BUILD
-    COMMAND ${CMAKE_DSYMUTIL} $<TARGET_FILE:libhermes> --out ${DSYM_PATH}
+  add_custom_command(TARGET hermesvm POST_BUILD
+    COMMAND ${CMAKE_DSYMUTIL} $<TARGET_FILE:hermesvm> --out ${DSYM_PATH}
     BYPRODUCTS ${DSYM_PATH}
   )
 
