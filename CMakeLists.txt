@@ -203,10 +203,6 @@ set(HERMES_ENABLE_FUZZILLI OFF CACHE BOOL
 set(HERMES_ENABLE_TOOLS ON CACHE BOOL
   "Enable CLI tools")
 
-# Enable bitcode
-set(HERMES_ENABLE_BITCODE OFF CACHE BOOL
-  "Include bitcode with the framework")
-
 # Set linker flag for building the fuzzer
 set(HERMES_FUZZING_FLAG "-fsanitize=fuzzer" CACHE STRING
   "Linker argument to link fuzz targets against a given fuzzer.")
@@ -565,7 +561,6 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" MATCHES "MSVC")
   endif()
 
   # TODO: Investigate disabling strict signed integer overflow for MSVC
-  
   # MSVC does not have strict aliasing so there is no need to support it.
   # Similar to GCC/Clang above, disable strict signed integer overflow.
   # append("/d2UndefIntOverflow-" CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
