@@ -327,9 +327,9 @@ if(HERMES_CHECK_NATIVE_STACK)
   add_definitions(-DHERMES_CHECK_NATIVE_STACK)
 endif()
 
-if(HERMES_BUILD_APPLE_DSYM)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gdwarf")
-endif()
+# if(HERMES_BUILD_APPLE_DSYM)
+#   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gdwarf")
+# endif()
 
 if (HERMES_IS_MOBILE_BUILD)
   add_definitions(-DHERMES_IS_MOBILE_BUILD)
