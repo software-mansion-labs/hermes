@@ -75,7 +75,16 @@ function configure_apple_framework {
     -DIMPORT_HERMESC:PATH="$PWD/build_host_hermesc/ImportHermesc.cmake" \
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DCMAKE_CXX_FLAGS="-gdwarf" \
     -DIMPORT_HOST_COMPILERS="$PWD/build_host_hermesc/ImportHostCompilers.cmake"
+}
+
+function generate_dSYM {
+  TARGET_PLATFORM="$1"
+  DSYM_PATH="$PWD/build_$TARGET_PLATFORM/lib/hermesvm.framework.dSYM"
+  xcrun dsymutil "$PWD/build_$TARGET_PLATFORM/lib/hermesvm.framework/hermesvm" --out "$DSYM_PATH"
+  mkdir -p "$PWD/destroot/Library/Frameworks/$TARGET_PLATFORM"
+  cp -R "$DSYM_PATH" "$PWD/destroot/Library/Frameworks/$TARGET_PLATFORM"
 }
 
 # Utility function to build an Apple framework
@@ -93,6 +102,8 @@ function build_apple_framework {
   else
     (cd "./build_$1" && make install/strip)
   fi
+
+  generate_dSYM "$1"
 }
 
 # Accepts an array of frameworks and will place all of
