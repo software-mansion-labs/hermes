@@ -76,6 +76,7 @@ function configure_apple_framework {
     -DCMAKE_INSTALL_PREFIX:PATH=../destroot \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_CXX_FLAGS="-gdwarf" \
+    -DCMAKE_C_FLAGS="-gdwarf" \
     -DIMPORT_HOST_COMPILERS="$PWD/build_host_hermesc/ImportHostCompilers.cmake"
 }
 
