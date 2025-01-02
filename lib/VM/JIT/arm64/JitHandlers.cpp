@@ -143,6 +143,16 @@ SHLegacyValue _interpreter_create_regexp(
       .getHermesValue();
 }
 
+void _interpreter_create_class(SHRuntime *shr, SHLegacyValue *frameRegs) {
+  Runtime &runtime = getRuntime(shr);
+  if (LLVM_UNLIKELY(
+          Interpreter::caseCreateClass(
+              runtime, (PinnedHermesValue *)frameRegs) ==
+          ExecutionStatus::EXCEPTION)) {
+    _sh_throw_current(shr);
+  }
+}
+
 /// Implementation of createFunctionEnvironment that takes the closure to get
 /// the parentEnvironment from.
 /// The native backend doesn't use createFunctionEnvironment.
@@ -195,7 +205,7 @@ _sh_ljs_string_add(SHRuntime *shr, SHLegacyValue *left, SHLegacyValue *right) {
 #ifdef HERMESVM_PROFILER_BB
 void _interpreter_register_bb_execution(SHRuntime *shr, uint16_t pointIndex) {
   Runtime &runtime = getRuntime(shr);
-  CodeBlock *codeBlock = runtime.getCurrentFrame().getCalleeCodeBlock(runtime);
+  CodeBlock *codeBlock = runtime.getCurrentFrame().getCalleeCodeBlock();
   runtime.getBasicBlockExecutionInfo().executeBlock(codeBlock, pointIndex);
 }
 #endif
@@ -264,22 +274,17 @@ void *_jit_find_catch_target(
   _sh_throw_current(shr);
 }
 
-SHLegacyValue _jit_dispatch_call(SHRuntime *shr, SHLegacyValue *frame) {
+SHLegacyValue _jit_dispatch_call(
+    SHRuntime *shr,
+    SHLegacyValue *callTargetSHLV) {
   Runtime &runtime = getRuntime(shr);
 
-  // TODO: Move this call setup and the fast path into the emitted JIT code.
-  StackFramePtr newFrame(runtime.getStackPointer());
-  newFrame.getPreviousFrameRef() = HermesValue::encodeNativePointer(frame);
-  newFrame.getSavedIPRef() =
-      HermesValue::encodeNativePointer(runtime.getCurrentIP());
-  newFrame.getSavedCodeBlockRef() = HermesValue::encodeNativePointer(nullptr);
-  newFrame.getSHLocalsRef() = HermesValue::encodeNativePointer(nullptr);
-
-  auto *callTarget = &newFrame.getCalleeClosureOrCBRef();
+  auto *callTarget = toPHV(callTargetSHLV);
   if (vmisa<JSFunction>(*callTarget)) {
     JSFunction *jsFunc = vmcast<JSFunction>(*callTarget);
-    if (auto *fnPtr = jsFunc->getCodeBlock()->getJITCompiled())
-      return fnPtr(&runtime);
+    assert(
+        !jsFunc->getCodeBlock()->getJITCompiled() &&
+        "Calls to JITted code should go directly.");
     CallResult<HermesValue> result = jsFunc->_interpret(runtime);
     if (LLVM_UNLIKELY(result == ExecutionStatus::EXCEPTION))
       _sh_throw_current(getSHRuntime(runtime));

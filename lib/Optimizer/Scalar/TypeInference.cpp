@@ -439,6 +439,16 @@ class TypeInferenceImpl {
   Type inferAddEmptyStringInst(AddEmptyStringInst *inst) {
     return *inst->getInherentType();
   }
+  Type inferToPropertyKeyInst(ToPropertyKeyInst *inst) {
+    Type t = inst->getSingleOperand()->getType();
+    if (t.isSymbolType()) {
+      return Type::createSymbol();
+    }
+    if (t.isPrimitive() && !t.canBeSymbol()) {
+      return Type::createString();
+    }
+    return Type::unionTy(Type::createString(), Type::createSymbol());
+  }
   Type inferAsNumberInst(AsNumberInst *inst) {
     return *inst->getInherentType();
   }
@@ -552,14 +562,14 @@ class TypeInferenceImpl {
     return Type::createNoType();
   }
 
-  Type inferStoreOwnPropertyInst(StoreOwnPropertyInst *inst) {
+  Type inferDefineOwnPropertyInst(DefineOwnPropertyInst *inst) {
     return Type::createNoType();
   }
-  Type inferStoreNewOwnPropertyInst(StoreNewOwnPropertyInst *inst) {
+  Type inferDefineNewOwnPropertyInst(DefineNewOwnPropertyInst *inst) {
     return Type::createNoType();
   }
 
-  Type inferStoreGetterSetterInst(StoreGetterSetterInst *inst) {
+  Type inferDefineOwnGetterSetterInst(DefineOwnGetterSetterInst *inst) {
     return Type::createNoType();
   }
   Type inferDeletePropertyLooseInst(DeletePropertyLooseInst *inst) {
@@ -620,10 +630,16 @@ class TypeInferenceImpl {
   Type inferTryEndInst(TryEndInst *inst) {
     return Type::createNoType();
   }
+  Type inferBranchIfBuiltinInst(BranchIfBuiltinInst *inst) {
+    return Type::createNoType();
+  }
   Type inferGetNewTargetInst(GetNewTargetInst *inst) {
     return inst->getOperand(GetNewTargetInst::GetNewTargetParamIdx)->getType();
   }
   Type inferTypeOfInst(TypeOfInst *inst) {
+    return *inst->getInherentType();
+  }
+  Type inferTypeOfIsInst(TypeOfIsInst *inst) {
     return *inst->getInherentType();
   }
   Type inferThrowIfInst(ThrowIfInst *inst) {
@@ -641,6 +657,9 @@ class TypeInferenceImpl {
 
     return Type::subtractTy(type, Type::createEmpty());
   }
+  Type inferThrowIfThisInitializedInst(ThrowIfThisInitializedInst *inst) {
+    return Type::createNoType();
+  }
   Type inferIteratorBeginInst(IteratorBeginInst *inst) {
     return Type::createAnyType();
   }
@@ -650,6 +669,9 @@ class TypeInferenceImpl {
   Type inferIteratorCloseInst(IteratorCloseInst *inst) {
     return Type::createAnyType();
   }
+  Type inferCacheNewObjectInst(CacheNewObjectInst *inst) {
+    return Type::createNoType();
+  }
   Type inferUnreachableInst(UnreachableInst *inst) {
     return Type::createNoType();
   }
@@ -658,6 +680,10 @@ class TypeInferenceImpl {
     return *inst->getInherentType();
   }
   Type inferCreateGeneratorInst(CreateGeneratorInst *inst) {
+    return *inst->getInherentType();
+  }
+
+  Type inferCreateClassInst(CreateClassInst *inst) {
     return *inst->getInherentType();
   }
 
@@ -692,6 +718,9 @@ class TypeInferenceImpl {
     return Type::createNoType();
   }
   Type inferHBCCompareBranchInst(HBCCompareBranchInst *inst) {
+    return Type::createNoType();
+  }
+  Type inferHBCCmpBrTypeOfIsInst(HBCCmpBrTypeOfIsInst *inst) {
     return Type::createNoType();
   }
   Type inferSwitchImmInst(SwitchImmInst *inst) {
@@ -1146,11 +1175,19 @@ bool TypeInferenceImpl::runOnFunctionsAndVars(
       dbgs() << "\nStart Type Inference on " << functions.size()
              << " functions and " << vars.size() << "vars.\n");
 
+  // Post-order traversal of blocks for each function.
+  // Reverse when iterating, so that we visit the blocks in reverse post-order.
+  // Precomputed to avoid recomputing it in the inner loop.
+  llvh::DenseMap<Function *, std::vector<BasicBlock *>> funcPostOrders{};
+
   // Begin by clearing the existing types and storing pre-pass types.
   // This prevents us from relying on the previous inference pass's type info,
   // which can be too loose (if things have been simplified, etc.).
-  for (Function *F : functions)
+  // Also precompute the post-order traversal for each function.
+  for (Function *F : functions) {
     clearTypesInFunction(F);
+    funcPostOrders.try_emplace(F, postOrderAnalysis(F));
+  }
 
   for (Variable *V : vars) {
     prePassTypes_.try_emplace(V, V->getType());
@@ -1182,8 +1219,9 @@ bool TypeInferenceImpl::runOnFunctionsAndVars(
     // Infer types of instructions.
     bool inferredInst = false;
     for (Function *F : functions) {
-      for (auto &bbit : *F) {
-        for (auto &it : bbit) {
+      llvh::ArrayRef<BasicBlock *> postOrder = funcPostOrders[F];
+      for (auto *bbit : llvh::reverse(postOrder)) {
+        for (auto &it : *bbit) {
           Instruction *I = &it;
           inferredInst |= inferInstruction(I);
         }

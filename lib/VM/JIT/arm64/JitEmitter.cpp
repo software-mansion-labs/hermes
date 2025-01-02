@@ -114,6 +114,21 @@ void emit_sh_ljs_is_string(
   a.cmn(xTempReg, -HVTag_Str);
 }
 
+/// Emit code to check whether the input reg is a bigint, using the specified
+/// temp register. The input reg is not
+/// modified unless it is the same as the temp, which is allowed.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_is_bigint(
+    a64::Assembler &a,
+    const a64::GpX &xTempReg,
+    const a64::GpX &xInputReg) {
+  // Get the tag bits by right shifting.
+  static_assert(
+      (int16_t)HVTag_BigInt == (int16_t)(-2) && "HVTag_BigInt must be -2");
+  a.asr(xTempReg, xInputReg, kHV_NumDataBits);
+  a.cmn(xTempReg, -HVTag_BigInt);
+}
+
 /// Emit code to check whether the input reg is empty, using the specified
 /// temp register.
 /// The input reg is not modified unless it is the same as the temp,
@@ -128,6 +143,38 @@ void emit_sh_ljs_is_empty(
       (int16_t)HVETag_Empty == (int16_t)(-14) && "HVETag_Empty must be -14");
   a.asr(xTempReg, xInputReg, kHV_NumDataBits - 1);
   a.cmn(xTempReg, -HVETag_Empty);
+}
+
+/// Emit code to check whether the input reg is null, using the specified
+/// temp register.
+/// The input reg is not modified unless it is the same as the temp,
+/// which is allowed.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_is_null(
+    a64::Assembler &a,
+    const a64::GpX &xTempReg,
+    const a64::GpX &xInputReg) {
+  // Get the tag bits by right shifting.
+  static_assert(
+      (int16_t)HVETag_Null == (int16_t)(-11) && "HVETag_Null must be -11");
+  a.asr(xTempReg, xInputReg, kHV_NumDataBits - 1);
+  a.cmn(xTempReg, -HVETag_Null);
+}
+
+/// Emit code to check whether the input reg is bool, using the specified
+/// temp register.
+/// The input reg is not modified unless it is the same as the temp,
+/// which is allowed.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_is_bool(
+    a64::Assembler &a,
+    const a64::GpX &xTempReg,
+    const a64::GpX &xInputReg) {
+  // Get the tag bits by right shifting.
+  static_assert(
+      (int16_t)HVETag_Bool == (int16_t)(-10) && "HVETag_Bool must be -10");
+  a.asr(xTempReg, xInputReg, kHV_NumDataBits - 1);
+  a.cmn(xTempReg, -HVETag_Bool);
 }
 
 /// Emit code to check whether the input reg is undefined, using the specified
@@ -150,6 +197,24 @@ void emit_sh_ljs_is_undefined(
   a.cmn(xTempReg, -HVETag_Undefined);
 }
 
+/// Emit code to check whether the input reg is Symbol, using the specified
+/// temp register.
+/// The input reg is not modified unless it is the same as the temp,
+/// which is allowed.
+/// CPU flags are updated as result. b.eq on success.
+void emit_sh_ljs_is_symbol(
+    a64::Assembler &a,
+    const a64::GpX &xTempReg,
+    const a64::GpX &xInputReg) {
+  // Get the tag bits by right shifting.
+  static_assert(
+      HERMESVALUE_VERSION == 1, "HVETag_Symbol must be at kHV_NumDataBits - 1");
+  static_assert(
+      (int16_t)HVETag_Symbol == (int16_t)(-9) && "HVETag_Symbol must be -9");
+  a.asr(xTempReg, xInputReg, kHV_NumDataBits - 1);
+  a.cmn(xTempReg, -HVETag_Symbol);
+}
+
 /// For a register \p inOut that contains a bool (i.e. either 0 or 1), turn it
 /// into a HermesValue boolean by adding the corresponding tag.
 void emit_sh_ljs_bool(a64::Assembler &a, const a64::GpX inOut) {
@@ -162,6 +227,52 @@ void emit_sh_ljs_bool(a64::Assembler &a, const a64::GpX inOut) {
       "Boolean tag must be 16 bits.");
   // Add the bool tag.
   a.movk(inOut, baseBool.raw >> kHV_NumDataBits, kHV_NumDataBits);
+}
+
+/// For a register \p out, emit a bool HermesValue with the corrsponding \p val.
+void emit_sh_ljs_const_bool(a64::Assembler &a, const a64::GpX xOut, bool val) {
+  static constexpr SHLegacyValue baseBool = HermesValue::encodeBoolValue(false);
+  // We know that the ETag for bool as a 0 in its lowest bit, and is therefore a
+  // shifted 16 bit value. We can exploit this to use movk to set the tag.
+  static_assert(HERMESVALUE_VERSION == 1);
+  static_assert(
+      (llvh::isShiftedUInt<16, kHV_NumDataBits>(baseBool.raw)) &&
+      "Boolean tag must be 16 bits.");
+  if (val) {
+    a.mov(xOut, 1);
+    a.movk(xOut, baseBool.raw >> kHV_NumDataBits, kHV_NumDataBits);
+  } else {
+    a.movz(xOut, baseBool.raw >> kHV_NumDataBits, kHV_NumDataBits);
+  }
+}
+
+/// For a register containing a pointer to a GCCell, retrieve its CellKind (a
+/// single byte) and store it in \p wOut.
+/// \p wOut and \p xIn may refer to the same register.
+void emit_gccell_get_kind(
+    a64::Assembler &a,
+    const a64::GpW &wOut,
+    const a64::GpX &xIn) {
+  a.ldrb(
+      wOut,
+      a64::Mem(
+          xIn,
+          offsetof(SHGCCell, kindAndSize) + RuntimeOffsets::kindAndSizeKind));
+}
+
+/// For a register \p wIn that contains a CellKind, check whether it falls
+/// within the kind range [first, last].
+/// The \p wInput is not modified unless it is the same as \p wTemp, which is
+/// allowed.
+/// CPU flags are updated as result. b_ls on success, or b_hi on failure.
+void emit_cellkind_in_range(
+    a64::Assembler &a,
+    const a64::GpW &wTemp,
+    const a64::GpW &wInput,
+    CellKind first,
+    CellKind last) {
+  a.sub(wTemp, wInput, first);
+  a.cmp(wTemp, (uint32_t)last - (uint32_t)first);
 }
 
 /// For a register \p dInput, which contains a double, check whether it is a
@@ -753,7 +864,7 @@ void Emitter::frameSetup(
     a.add(a64::x0, a64::sp, jmpBufOffset + offsetof(SHJmpBuf, buf));
     // setjmp can't throw and it'll be called once, so don't use a thunk.
     EMIT_RUNTIME_CALL_WITHOUT_THUNK_AND_SAVED_IP(
-        *this, int (*)(jmp_buf), _setjmp);
+        *this, int (*)(jmp_buf), _sh_setjmp);
     // If this a catch, go to the catch table to jump to either a handler BB or
     // rethrow.
     a.cbnz(a64::x0, catchTableLabel_);
@@ -2276,6 +2387,61 @@ void Emitter::createClosure(
   frUpdatedWithHW(frRes, hwRes);
 }
 
+void Emitter::createBaseClass(FR frRes, FR frPrototypeOut, FR frEnv) {
+  comment(
+      "// CreateBaseClass r%u, r%u, r%u",
+      frRes.index(),
+      frPrototypeOut.index(),
+      frEnv.index());
+  // TODO: we should also not be syncing frPrototypeOut when possible.
+  syncAllFRTempExcept(frRes != frEnv ? frRes : FR());
+  syncToFrame(frEnv);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  // The interpreter expects that the frameRegs it receives starts on the first
+  // local register.
+  auto ofs = hbc::StackFrameLayout::FirstLocal * sizeof(SHLegacyValue);
+  a.add(a64::x1, xFrame, ofs);
+  EMIT_RUNTIME_CALL(
+      *this, void (*)(SHRuntime *, SHLegacyValue *), _interpreter_create_class);
+
+  // Ensure that the out params have their frame location marked as up-to-date,
+  // and any global register is updated.
+  syncFrameOutParam(frRes);
+  syncFrameOutParam(frPrototypeOut);
+}
+
+void Emitter::createDerivedClass(
+    FR frRes,
+    FR frPrototypeOut,
+    FR frEnv,
+    FR frSuperClass) {
+  comment(
+      "// CreateDerivedClass r%u, r%u, r%u r%u",
+      frRes.index(),
+      frPrototypeOut.index(),
+      frEnv.index(),
+      frSuperClass.index());
+  // TODO: we should also not be syncing frPrototypeOut when possible.
+  syncAllFRTempExcept(frRes != frEnv && frRes != frSuperClass ? frRes : FR());
+  syncToFrame(frEnv);
+  syncToFrame(frSuperClass);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  // The interpreter expects that the frameRegs it receives starts on the first
+  // local register.
+  auto ofs = hbc::StackFrameLayout::FirstLocal * sizeof(SHLegacyValue);
+  a.add(a64::x1, xFrame, ofs);
+  EMIT_RUNTIME_CALL(
+      *this, void (*)(SHRuntime *, SHLegacyValue *), _interpreter_create_class);
+
+  // Ensure that the updated frame location is sync'd back.
+  syncFrameOutParam(frRes);
+  syncFrameOutParam(frPrototypeOut);
+}
+
 void Emitter::createGenerator(
     FR frRes,
     FR frEnv,
@@ -2672,6 +2838,35 @@ void Emitter::throwIfEmpty(FR frRes, FR frInput) {
        }});
 }
 
+void Emitter::throwIfThisInitialized(FR frInput) {
+  comment("// ThrowIfThisInitialized r%u", frInput.index());
+
+  asmjit::Label slowPathLab = newSlowPathLabel();
+
+  // TODO: Add back the sync/free calls inside try.
+  // Outside a try it's not observable behavior.
+  HWReg hwInput = getOrAllocFRInGpX(frInput, true);
+  HWReg hwTemp = allocTempGpX();
+  freeReg(hwTemp);
+
+  emit_sh_ljs_is_empty(a, hwTemp.a64GpX(), hwInput.a64GpX());
+  a.b_ne(slowPathLab);
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .frInput1 = frInput,
+       .emittingIP = emittingIP,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: ThrowIfThisInitialized r%u", sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         EMIT_RUNTIME_CALL(
+             em, void (*)(SHRuntime *), _sh_throw_this_already_initialized);
+         // Call does not return.
+       }});
+}
+
 void Emitter::createRegExp(
     FR frRes,
     SHSymbolID patternID,
@@ -2783,44 +2978,13 @@ void Emitter::putByValImpl(
   callThunkWithSavedIP((void *)shImpl, shImplName);
 }
 
-void Emitter::delByIdImpl(
-    FR frRes,
-    FR frTarget,
-    SHSymbolID key,
-    const char *name,
-    SHLegacyValue (
-        *shImpl)(SHRuntime *shr, SHLegacyValue *target, SHSymbolID key),
-    const char *shImplName) {
-  comment("// %s r%u, r%u, %u", name, frRes.index(), frTarget.index(), key);
-
-  syncAllFRTempExcept(frRes != frTarget ? frRes : FR{});
-  syncToFrame(frTarget);
-  freeAllFRTempExcept({});
-
-  a.mov(a64::x0, xRuntime);
-  loadFrameAddr(a64::x1, frTarget);
-  a.mov(a64::w2, key);
-  callThunkWithSavedIP((void *)shImpl, shImplName);
-
-  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
-  movHWFromHW<false>(hwRes, HWReg::gpX(0));
-  frUpdatedWithHW(frRes, hwRes);
-}
-
-void Emitter::delByValImpl(
-    FR frRes,
-    FR frTarget,
-    FR frKey,
-    const char *name,
-    SHLegacyValue (
-        *shImpl)(SHRuntime *shr, SHLegacyValue *target, SHLegacyValue *key),
-    const char *shImplName) {
+void Emitter::delByVal(FR frRes, FR frTarget, FR frKey, bool strict) {
   comment(
-      "// %s r%u, r%u, r%u",
-      name,
+      "// DelByVal r%u, r%u, r%u, %d",
       frRes.index(),
       frTarget.index(),
-      frKey.index());
+      frKey.index(),
+      strict);
 
   syncAllFRTempExcept(frRes != frTarget && frRes != frKey ? frRes : FR{});
   syncToFrame(frTarget);
@@ -2830,7 +2994,17 @@ void Emitter::delByValImpl(
   a.mov(a64::x0, xRuntime);
   loadFrameAddr(a64::x1, frTarget);
   loadFrameAddr(a64::x2, frKey);
-  callThunkWithSavedIP((void *)shImpl, shImplName);
+  if (strict) {
+    EMIT_RUNTIME_CALL(
+        *this,
+        SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+        _sh_ljs_del_by_val_strict);
+  } else {
+    EMIT_RUNTIME_CALL(
+        *this,
+        SHLegacyValue(*)(SHRuntime *, SHLegacyValue *, SHLegacyValue *),
+        _sh_ljs_del_by_val_loose);
+  }
 
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
@@ -3021,6 +3195,347 @@ void Emitter::getByIdImpl(
     a.bind(contLab);
 }
 
+void Emitter::jmpTypeOfIs(
+    const asmjit::Label &target,
+    FR frInput,
+    TypeOfIsTypes origTypes) {
+  comment("// jTypeOfIs r%u, %u", frInput.index(), origTypes.getRaw());
+
+  TypeOfIsTypes invertedTypes = origTypes.invert();
+
+  // Do this always because it's the end of a basic block.
+  // The freeAllFRTempExcept calls are within fast paths because we may want to
+  // use FR temps to syncToFrame(frInput) in the call path, and we know at JIT
+  // time whether we'll emit the call path.
+  syncAllFRTempExcept({});
+
+  HWReg hwInput = getOrAllocFRInGpX(frInput, true);
+  HWReg hwTemp = allocTempGpX();
+  freeReg(hwTemp);
+  freeAllFRTempExcept({});
+
+  auto xInput = hwInput.a64GpX();
+  auto xTemp = hwTemp.a64GpX();
+  auto wTemp = xTemp.w();
+
+  // Try and see if inverting will result in fewer checks.
+  // If so, flip it and set invert=true.
+  bool invert = false;
+  TypeOfIsTypes typesToCheck = origTypes;
+  if (invertedTypes.count() < origTypes.count()) {
+    invert = true;
+    typesToCheck = invertedTypes;
+  }
+
+  // doneLab goes at the end of the instruction if there's multiple bits to
+  // check, allowing short-circuiting the remaining checks if one of the
+  // TypeOfIsTypes bits matches the kind of the input.
+  // Use numRemainingTypes to track how many bits are left to check.
+  asmjit::Label doneLab = a.newLabel();
+  size_t numRemainingTypes = typesToCheck.count();
+
+  // Checks are done as follows:
+  // * If not inverted, just go to the target if the tag matches the bit,
+  //   else fallthrough to the next case (if any).
+  // * If inverted and there's multiple bits remaining,
+  //   if the tag matches the bit, short circuit to doneLab and we've
+  //   finished executing the instruction (no need to check the other bits).
+  // * If inverted and there's only one bit remaining,
+  //   then if the tag does NOT match the bit, go to the target
+  //   immediately.
+  //
+  // In this way, single-bit checks (both inverted and not) are fast,
+  // and multiple-bit checks are correct.
+  // It's possible more complexity can optimize this further if needed, but this
+  // is not a bad start.
+
+  /// Emit the simple check for a match.
+  /// If we're not inverted, branch to the target based on cond.
+  /// If we're inverted:
+  ///   If there's bits remaining to check, branch to doneLab if the tag matches
+  ///   because we can short circuit the rest of the checks.
+  ///   If there's no bits remaining to check, branch to the target if the tag
+  ///   does NOT match the bit.
+  /// \param cond the condition code, which if true, indicates a tag match.
+  auto emitCondCheck = [this, invert, &numRemainingTypes, &target, &doneLab](
+                           a64::CondCode cond) {
+    if (!invert)
+      a.b(cond, target);
+    else if (numRemainingTypes > 0)
+      a.b(cond, doneLab);
+    else
+      a.b(a64::negateCond(cond), target);
+  };
+
+  if (typesToCheck.hasUndefined()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_undefined(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasSymbol()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_symbol(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasString()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_string(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasBoolean()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_bool(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasNull()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_null(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasBigint()) {
+    --numRemainingTypes;
+    emit_sh_ljs_is_bigint(a, xTemp, xInput);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasNumber()) {
+    --numRemainingTypes;
+    static_assert(
+        HERMESVALUE_VERSION == 1,
+        "HVTag_First must be the first after double limit");
+    loadBits64InGp(
+        xTemp, ((uint64_t)HVTag_First << kHV_NumDataBits), "doubleLim");
+    a.cmp(xInput, xTemp);
+    emitCondCheck(a64::CondCode::kLO);
+  }
+  // TODO: Special-case if both hasObject() and hasFunction() are set,
+  // because we no longer would need to check the CellKind.
+  if (typesToCheck.hasObject()) {
+    --numRemainingTypes;
+    asmjit::Label objectDoneLab = a.newLabel();
+    emit_sh_ljs_is_object(a, xTemp, xInput);
+    if (!invert)
+      a.b_ne(objectDoneLab);
+    else if (numRemainingTypes > 0)
+      a.b_ne(objectDoneLab);
+    else
+      a.b_ne(target);
+    emit_sh_ljs_get_pointer(a, hwTemp.a64GpX(), hwInput.a64GpX());
+    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_cellkind_in_range(
+        a,
+        wTemp,
+        wTemp,
+        CellKind::CallableKind_first,
+        CellKind::CallableKind_last);
+    emitCondCheck(a64::CondCode::kHI);
+    a.bind(objectDoneLab);
+  }
+  if (typesToCheck.hasFunction()) {
+    --numRemainingTypes;
+    asmjit::Label functionDoneLab = a.newLabel();
+    emit_sh_ljs_is_object(a, xTemp, xInput);
+    if (!invert)
+      a.b_ne(functionDoneLab);
+    else if (numRemainingTypes > 0)
+      a.b_ne(functionDoneLab);
+    else
+      a.b_ne(target);
+    emit_sh_ljs_get_pointer(a, xTemp, xInput);
+    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_cellkind_in_range(
+        a,
+        wTemp,
+        wTemp,
+        CellKind::CallableKind_first,
+        CellKind::CallableKind_last);
+    emitCondCheck(a64::CondCode::kLS);
+    a.bind(functionDoneLab);
+  }
+
+  assert(numRemainingTypes == 0 && "missed a type");
+
+  // Put doneLab after, so we skip the branch if we directly branch to doneLab
+  // from above.
+  a.bind(doneLab);
+}
+
+void Emitter::typeOfIs(FR frRes, FR frInput, TypeOfIsTypes origTypes) {
+  comment(
+      "// typeOfIs r%u, r%u, %u",
+      frRes.index(),
+      frInput.index(),
+      origTypes.getRaw());
+
+  // Store the input in hwInputTemp for the duration of the instruction.
+  // Needed because it's possible frRes == frInput, and we want to write to
+  // frRes at the top of the instruction.
+  HWReg hwInputTemp;
+  if (frRes == frInput) {
+    hwInputTemp = allocTempGpX();
+    movHWFromFR(hwInputTemp, frInput);
+  } else {
+    hwInputTemp = getOrAllocFRInGpX(frInput, true);
+  }
+  HWReg hwTemp = allocTempGpX();
+  HWReg hwRes = getOrAllocFRInGpX(frRes, false);
+  frUpdatedWithHW(frRes, hwRes);
+  freeReg(hwTemp);
+  if (frRes == frInput) {
+    freeReg(hwInputTemp);
+  }
+
+  auto xInputTemp = hwInputTemp.a64GpX();
+  auto xTemp = hwTemp.a64GpX();
+  auto wTemp = xTemp.w();
+  auto xRes = hwRes.a64GpX();
+
+  TypeOfIsTypes invertedTypes = origTypes.invert();
+
+  // Try and see if inverting will result in fewer checks.
+  // If so, flip it and set invert=true.
+  bool invert = false;
+  TypeOfIsTypes typesToCheck = origTypes;
+  if (invertedTypes.count() < origTypes.count()) {
+    invert = true;
+    typesToCheck = invertedTypes;
+  }
+
+  // matchLab goes directly to the end of the instruction if there are multiple
+  // bits to check, allowing short-circuiting the remaining checks if one of the
+  // TypeOfIsTypes bits matches the kind of the input.
+  // If there's only one bit to check, we don't put extra code the end - none of
+  // the other cases will be emitted.
+  asmjit::Label matchLab{};
+  if (typesToCheck.count() > 1)
+    matchLab = a.newLabel();
+
+  // First, initialize xRes as follows:
+  // * If there are multiple bits set, initialize it to the value we would
+  //   produce on a match. This is false if inverted and true otherwise.
+  // * If there's only one bit set, initialize it to false so it can be easily
+  //   toggled with cinc. Incrementing it will set it to true.
+  //
+  // Checks are done as follows:
+  // * If there are multiple bits set, then matchLab is valid,
+  //   so if the tag matches the bit, branch to matchLab.
+  //   If the tag doesn't match, then fall through to the next check.
+  // * If there's only one bit set, then matchLab is NOT valid,
+  //   so emit cinc with the appropriate condition code and we're done.
+  //
+  // In this way, single-bit checks (both inverted and not) are fast,
+  // and multiple-bit checks are correct.
+
+  /// Emit the simple check for a match.
+  /// If there's multiple bits to check, this will branch based on \p cond
+  /// to matchLab if the tag matches.
+  /// If there's only one bit to check, this will emit a cinc with the
+  /// appropriate condition code (and we're done).
+  /// \param cond the condition code, which if true, indicates a tag match.
+  auto emitCondCheck = [this, invert, &xRes, &matchLab](a64::CondCode cond) {
+    if (matchLab.isValid())
+      a.b(cond, matchLab);
+    else
+      a.cinc(xRes, xRes, !invert ? cond : a64::negateCond(cond));
+  };
+
+  static_assert(
+      HERMESVALUE_VERSION == 1,
+      "bool must be a tag with a low bit that indicates the bool value");
+  // As described above, initialize it to false if it is inverted or there is
+  // only a single case.
+  emit_sh_ljs_const_bool(a, xRes, matchLab.isValid() && !invert);
+
+  if (typesToCheck.hasUndefined()) {
+    emit_sh_ljs_is_undefined(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasSymbol()) {
+    emit_sh_ljs_is_symbol(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasString()) {
+    emit_sh_ljs_is_string(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasBoolean()) {
+    emit_sh_ljs_is_bool(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasBigint()) {
+    emit_sh_ljs_is_bigint(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasNull()) {
+    emit_sh_ljs_is_null(a, xTemp, xInputTemp);
+    emitCondCheck(a64::CondCode::kEQ);
+  }
+  if (typesToCheck.hasNumber()) {
+    static_assert(
+        HERMESVALUE_VERSION == 1,
+        "HVTag_First must be the first after double limit");
+    loadBits64InGp(
+        xTemp, ((uint64_t)HVTag_First << kHV_NumDataBits), "doubleLim");
+    a.cmp(xInputTemp, xTemp);
+    emitCondCheck(a64::CondCode::kLO);
+  }
+  if (typesToCheck.hasObject()) {
+    asmjit::Label objectDoneLab = a.newLabel();
+    emit_sh_ljs_is_object(a, xTemp, xInputTemp);
+    if (matchLab.isValid()) {
+      // If the tag did NOT match, we can't run anything else in this case.
+      // We must branch, b_ne and proceed to try matching any other cases.
+      a.b_ne(objectDoneLab);
+    } else {
+      // No more tags to check. Decide the result here and go to the end.
+      if (invert)
+        a.cinc(xRes, xRes, a64::CondCode::kNE);
+      a.b_ne(objectDoneLab);
+    }
+    emit_sh_ljs_get_pointer(a, xTemp, xInputTemp);
+    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_cellkind_in_range(
+        a,
+        wTemp,
+        wTemp,
+        CellKind::CallableKind_first,
+        CellKind::CallableKind_last);
+    emitCondCheck(a64::CondCode::kHI);
+    a.bind(objectDoneLab);
+  }
+  if (typesToCheck.hasFunction()) {
+    asmjit::Label functionDoneLab = a.newLabel();
+    emit_sh_ljs_is_object(a, xTemp, xInputTemp);
+    if (matchLab.isValid()) {
+      // If the tag did NOT match, we can't run anything else in this case.
+      // We must branch, b_ne and proceed to try matching any other cases.
+      a.b_ne(functionDoneLab);
+    } else {
+      // No more tags to check. Decide the result here and go to the end.
+      if (invert)
+        a.cinc(xRes, xRes, a64::CondCode::kNE);
+      a.b_ne(functionDoneLab);
+    }
+    emit_sh_ljs_get_pointer(a, xTemp, xInputTemp);
+    emit_gccell_get_kind(a, wTemp, xTemp);
+    emit_cellkind_in_range(
+        a,
+        wTemp,
+        wTemp,
+        CellKind::CallableKind_first,
+        CellKind::CallableKind_last);
+    emitCondCheck(a64::CondCode::kLS);
+    a.bind(functionDoneLab);
+  }
+
+  if (matchLab.isValid()) {
+    // We failed to match, so flip the result
+    a.eor(xRes, xRes, 1);
+    // We initialize xRes to the "match value", so there is nothing to do on a
+    // match.
+    a.bind(matchLab);
+  }
+}
+
 void Emitter::switchImm(
     FR frInput,
     const asmjit::Label &defaultLabel,
@@ -3207,7 +3722,7 @@ asmjit::Label Emitter::newPrefLabel(const char *pref, size_t index) {
   return a.newNamedLabel(buf);
 }
 
-void Emitter::putOwnByIndex(FR frTarget, FR frValue, uint32_t key) {
+void Emitter::defineOwnByIndex(FR frTarget, FR frValue, uint32_t key) {
   comment(
       "// putOwnByIdx r%u, r%u, %u", frTarget.index(), frValue.index(), key);
 
@@ -3226,9 +3741,13 @@ void Emitter::putOwnByIndex(FR frTarget, FR frValue, uint32_t key) {
       _sh_ljs_put_own_by_index);
 }
 
-void Emitter::putOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable) {
+void Emitter::defineOwnByVal(
+    FR frTarget,
+    FR frValue,
+    FR frKey,
+    bool enumerable) {
   comment(
-      "// PutOwnByVal r%u, r%u, r%u",
+      "// DefineOwnByVal r%u, r%u, r%u",
       frTarget.index(),
       frValue.index(),
       frKey.index());
@@ -3258,14 +3777,14 @@ void Emitter::putOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable) {
   }
 }
 
-void Emitter::putOwnGetterSetterByVal(
+void Emitter::defineOwnGetterSetterByVal(
     FR frTarget,
     FR frKey,
     FR frGetter,
     FR frSetter,
     bool enumerable) {
   comment(
-      "// PutOwnGetterSetterByVal r%u, r%u, r%u, r%u, %d",
+      "// DefineOwnGetterSetterByVal r%u, r%u, r%u, r%u, %d",
       frTarget.index(),
       frKey.index(),
       frGetter.index(),
@@ -3629,6 +4148,37 @@ void Emitter::callImpl(FR frRes, FR frCallee) {
         calleeFrameArg, calleeReg, frameRegs_[frCallee.index()].localType);
   }
 
+  static_assert(
+      HERMESVALUE_VERSION == 1,
+      "Native pointers must be encoded without modification");
+
+  FR previousFrameArg{nRegs + hbc::StackFrameLayout::PreviousFrame};
+  // Free any existing temp so we store directly.
+  freeFRTemp(previousFrameArg);
+  movFRFromHW(previousFrameArg, HWReg(xFrame), FRType::OtherNonPtr);
+
+  FR savedIPArg{nRegs + hbc::StackFrameLayout::SavedIP};
+  // Since we need a register to compute the IP in anyway, it is convenient to
+  // just use any existing one for the SavedIP slot, and let the syncAllFRTemp
+  // below write it to memory.
+  auto savedIPReg = getOrAllocFRInGpX(savedIPArg, false);
+
+  // Save the current IP in both the SavedIP slot and the runtime.
+  getBytecodeIP(savedIPReg.a64GpX());
+  frUpdatedWithHW(savedIPArg, savedIPReg, FRType::OtherNonPtr);
+  a.str(savedIPReg.a64GpX(), a64::Mem(xRuntime, offsetof(Runtime, currentIP_)));
+
+  FR savedCodeBlockArg = FR{nRegs + hbc::StackFrameLayout::SavedCodeBlock};
+  // TODO: We should be able to directly store xzr.
+  auto savedCodeBlockReg = getOrAllocFRInGpX(savedCodeBlockArg, false);
+  frUpdatedWithHW(savedCodeBlockArg, savedCodeBlockReg, FRType::OtherNonPtr);
+  a.mov(savedCodeBlockReg.a64GpX(), 0);
+
+  FR shLocalsArg{nRegs + hbc::StackFrameLayout::SHLocals};
+  // Free any existing temp so we store directly.
+  freeFRTemp(shLocalsArg);
+  movFRFromHW(shLocalsArg, savedCodeBlockReg, FRType::OtherNonPtr);
+
 #ifndef NDEBUG
   // No need to sync the set up call stack to the frame memory,
   // because it these registers can't have global registers.
@@ -3639,18 +4189,70 @@ void Emitter::callImpl(FR frRes, FR frCallee) {
   }
 #endif
 
+  auto hwCallee = getOrAllocFRInGpX(frCallee, true);
+  auto hwTemp = allocTempGpX();
+  auto xTemp = hwTemp.a64GpX();
   syncAllFRTempExcept(FR());
   freeAllFRTempExcept({});
-
-  a.mov(a64::x0, xRuntime);
-  a.mov(a64::x1, xFrame);
-  EMIT_RUNTIME_CALL(
-      *this,
-      SHLegacyValue(*)(SHRuntime *, SHLegacyValue *),
-      _jit_dispatch_call);
+  freeReg(hwTemp);
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   frUpdatedWithHW(frRes, hwRes);
+
+  auto slowPathLab = newSlowPathLabel();
+  auto contLab = newContLabel();
+
+  // Check if the callee is a JSFunction we have already JITted.
+  emit_sh_ljs_is_object(a, xTemp, hwCallee.a64GpX());
+  a.b_ne(slowPathLab);
+
+  // We can now use any temp registers we want, because everything has been
+  // sync'd and we are done with hwCallee.
+  emit_sh_ljs_get_pointer(a, a64::x0, hwCallee.a64GpX());
+  emit_gccell_get_kind(a, a64::w1, a64::x0);
+
+  // Check if it is a JSFunction.
+  emit_cellkind_in_range(
+      a,
+      a64::w1,
+      a64::w1,
+      CellKind::CodeBlockFunctionKind_first,
+      CellKind::CodeBlockFunctionKind_last);
+  a.b_hi(slowPathLab);
+
+  // Check if the JSFunction has already been JIT compiled.
+  a.ldr(a64::x1, a64::Mem(a64::x0, RuntimeOffsets::jsFunctionCodeBlock));
+  a.ldr(a64::x1, a64::Mem(a64::x1, RuntimeOffsets::codeBlockJitPtr));
+  a.cbz(a64::x1, slowPathLab);
+
+  // We have a JIT compiled function, call it.
+  a.mov(a64::x0, xRuntime);
+  a.blr(a64::x1);
+  a.bind(contLab);
+  // NOTE: this does the move for both the slow and fast paths.
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
+
+  slowPaths_.push_back(
+      {.slowPathLab = slowPathLab,
+       .contLab = contLab,
+       .frRes = frRes,
+       .frInput1 = frCallee,
+       .emit = [](Emitter &em, SlowPath &sl) {
+         em.comment(
+             "// Slow path: CallImpl r%u, r%u",
+             sl.frRes.index(),
+             sl.frInput1.index());
+         em.a.bind(sl.slowPathLab);
+         em.a.mov(a64::x0, xRuntime);
+         em.loadFrameAddr(
+             a64::x1,
+             FR(em.frameRegs_.size() +
+                hbc::StackFrameLayout::CalleeClosureOrCB));
+         EMIT_RUNTIME_CALL_WITHOUT_SAVED_IP(
+             em,
+             SHLegacyValue(*)(SHRuntime *, SHLegacyValue *),
+             _jit_dispatch_call);
+         em.a.b(sl.contLab);
+       }});
 }
 
 void Emitter::call(FR frRes, FR frCallee, uint32_t argc) {
@@ -3838,6 +4440,37 @@ void Emitter::callWithNewTargetLong(
   a.sub(hwArgcArg.a64GpX(), hwArgcArg.a64GpX(), 1);
 
   callImpl(frRes, frCallee);
+}
+
+void Emitter::callRequire(FR frRes, FR frRequireFunc, uint32_t modIndex) {
+  comment(
+      "// CallRequire r%u, r%u, %u",
+      frRes.index(),
+      frRequireFunc.index(),
+      modIndex);
+
+  syncAllFRTempExcept(frRes != frRequireFunc ? frRes : FR());
+  syncToFrame(frRequireFunc);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadBits64InGp(
+      a64::x1,
+      (uint64_t)codeBlock_->getRuntimeModule() +
+          RuntimeOffsets::runtimeModuleModuleCache,
+      "cacheData");
+  loadFrameAddr(a64::x2, frRequireFunc);
+  a.mov(a64::w3, modIndex);
+
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(
+          SHRuntime *, SHArrayStorage **, SHLegacyValue *, uint32_t),
+      _sh_ljs_callRequire);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false);
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
 }
 
 void Emitter::getBuiltinClosure(FR frRes, uint32_t builtinIndex) {
@@ -4108,6 +4741,24 @@ void Emitter::getNextPName(
 
   // Ensure that the updated frame location is sync'd back to any global reg.
   syncFrameOutParam(frIdx);
+
+  HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
+  movHWFromHW<false>(hwRes, HWReg::gpX(0));
+  frUpdatedWithHW(frRes, hwRes);
+}
+
+void Emitter::toPropertyKey(FR frRes, FR frVal) {
+  comment("// ToPropertyKey r%u, r%u", frRes.index(), frVal.index());
+  syncAllFRTempExcept(frRes != frVal ? frRes : FR());
+  syncToFrame(frVal);
+  freeAllFRTempExcept({});
+
+  a.mov(a64::x0, xRuntime);
+  loadFrameAddr(a64::x1, frVal);
+  EMIT_RUNTIME_CALL(
+      *this,
+      SHLegacyValue(*)(SHRuntime *, const SHLegacyValue *),
+      _sh_ljs_to_property_key);
 
   HWReg hwRes = getOrAllocFRInAnyReg(frRes, false, HWReg::gpX(0));
   movHWFromHW<false>(hwRes, HWReg::gpX(0));
@@ -4493,6 +5144,49 @@ void Emitter::jmpUndefined(const asmjit::Label &target, FR frInput) {
   a.b_eq(target);
 
   freeReg(hwTmpTag);
+}
+
+void Emitter::jmpBuiltinIs(
+    bool invert,
+    const asmjit::Label &target,
+    uint8_t builtinIndex,
+    FR frInput) {
+  comment(
+      "// JmpBuiltinIs%s r%u, %u",
+      invert ? "Not" : "",
+      frInput.index(),
+      builtinIndex);
+
+  // Do this always, since this could be the end of the BB.
+  syncAllFRTempExcept({});
+  HWReg hwInput = getOrAllocFRInGpX(frInput, true);
+  HWReg hwBuiltin = allocTempGpX();
+  freeReg(hwBuiltin);
+  freeAllFRTempExcept({});
+
+  // Load builtin pointer.
+  static_assert(
+      std::is_same_v<
+          TransparentOwningPtr<Callable *, llvh::FreeDeleter>,
+          decltype(Runtime::builtins_)>,
+      "builtins_ is a list of Callable *");
+  static_assert(
+      offsetof(TransparentOwningPtr<Callable *>, ptr) == 0,
+      "TransparentOwningPtr must be transparent");
+  a.ldr(hwBuiltin.a64GpX(), a64::Mem(xRuntime, RuntimeOffsets::builtins));
+  a.ldr(
+      hwBuiltin.a64GpX(),
+      a64::Mem(hwBuiltin.a64GpX(), builtinIndex * sizeof(Callable *)));
+
+  // Encode an object HermesValue.
+  emit_sh_ljs_object(a, hwBuiltin.a64GpX());
+
+  // Compare the builtin pointer with the input, branch.
+  a.cmp(hwBuiltin.a64GpX(), hwInput.a64GpX());
+  if (!invert)
+    a.b_eq(target);
+  else
+    a.b_ne(target);
 }
 
 void Emitter::jCond(

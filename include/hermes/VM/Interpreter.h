@@ -219,12 +219,12 @@ class Interpreter {
       PinnedHermesValue *frameRegs,
       const inst::Inst *ip);
 
-  static ExecutionStatus casePutOwnByVal(
+  static ExecutionStatus caseDefineOwnByVal(
       Runtime &runtime,
       PinnedHermesValue *frameRegs,
       const inst::Inst *ip);
 
-  static ExecutionStatus casePutOwnGetterSetterByVal(
+  static ExecutionStatus caseDefineOwnGetterSetterByVal(
       Runtime &runtime,
       PinnedHermesValue *frameRegs,
       const inst::Inst *ip);
@@ -242,6 +242,24 @@ class Interpreter {
       Runtime &runtime,
       PinnedHermesValue *frameRegs,
       const Inst *ip);
+  static ExecutionStatus caseGetNextPName(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      const Inst *ip);
+
+  static ExecutionStatus caseDelByVal(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      const inst::Inst *ip);
+
+  /// Interpreter implementation for creating a RegExp object. Unlike the other
+  /// out-of-line cases, this takes a CodeBlock* and does not return an
+  /// ExecutionStatus.
+  static void caseCreateRegExp(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs,
+      CodeBlock *curCodeBlock,
+      const inst::Inst *ip);
 
   /// \return the `this` to be used for a construct call on \p callee, with \p
   /// newTarget as the new.target. We need to take special care when \p callee
@@ -254,6 +272,11 @@ class Interpreter {
       PinnedHermesValue *newTarget,
       uint8_t cacheIdx,
       CodeBlock *curCodeBlock);
+
+  /// Create a class, as per ES2023 15.7.14.
+  static ExecutionStatus caseCreateClass(
+      Runtime &runtime,
+      PinnedHermesValue *frameRegs);
 
   /// Evaluate callBuiltin and store the result in the register stack. it must
   /// must be invoked with CallBuiltin or CallBuiltinLong. \p op3 contains the

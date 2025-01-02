@@ -60,7 +60,7 @@ typedef struct SHNativeFuncInfo {
 
 /// Type of a function that allocates and returns a new SHUnit ready to be used
 /// with a runtime.
-typedef SHUnit *(*SHUnitCreator)();
+typedef SHUnit *(*SHUnitCreator)(void);
 
 /// SHUnit describes a compilation unit.
 ///
@@ -126,6 +126,11 @@ typedef struct SHUnit {
   /// NOTE: These should always be treated as WeakRoots, which means a read
   /// barrier is needed to safely read out the value.
   SHCompressedPointer *object_literal_class_cache;
+
+  /// The module exports cache: a map from non-negative integer module indexes
+  /// to the export of the module.  An empty value indicates that the module has
+  /// not yet been initialized.
+  SHArrayStorage *moduleExports;
 
   /// List of source locations.
   const SHSrcLoc *source_locations;
@@ -325,7 +330,20 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_create_this(
     SHLegacyValue *newTarget,
     SHPropertyCacheEntry *propCacheEntry);
 
-#define _sh_try(shr, jbuf) (_sh_push_try(shr, jbuf), _setjmp((jbuf)->buf))
+#ifndef _WINDOWS
+// Use _setjmp and _longjmp outside Windows, to avoid saving and restoring the
+// signal mask, which is costly and may interfere with signal mask manipulation
+// by non-Hermes code.
+#define _sh_setjmp _setjmp
+#define _sh_longjmp _longjmp
+#else
+// Windows does not provide _setjmp and _longjmp, so use setjmp and longjmp
+// instead.
+#define _sh_setjmp setjmp
+#define _sh_longjmp longjmp
+#endif
+
+#define _sh_try(shr, jbuf) (_sh_push_try(shr, jbuf), _sh_setjmp((jbuf)->buf))
 
 /// Push the given \p buf onto the exception handler stack.
 static inline void _sh_push_try(SHRuntime *shr, SHJmpBuf *buf) {
@@ -376,9 +394,27 @@ SHERMES_EXPORT void _sh_throw_type_error(SHRuntime *shr, SHLegacyValue *message)
 SHERMES_EXPORT void _sh_throw_type_error_ascii(
     SHRuntime *shr,
     const char *message) __attribute__((noreturn));
+SHERMES_EXPORT void _sh_throw_reference_error_ascii(
+    SHRuntime *shr,
+    const char *message) __attribute__((noreturn));
 
 /// Throw a ReferenceError for accessing uninitialized variable.
 SHERMES_EXPORT void _sh_throw_empty(SHRuntime *shr) __attribute__((noreturn));
+
+/// Throws a ReferenceError for double-initialization of `this`.
+__attribute__((noreturn)) static inline void _sh_throw_this_already_initialized(
+    SHRuntime *shr) {
+  _sh_throw_reference_error_ascii(shr, "Cannot call super constructor twice");
+}
+
+/// Throw a ReferenceError if the given derived class constructor's checked this
+/// is already initialized.
+static inline void _sh_ljs_throw_if_this_initialized(
+    SHRuntime *shr,
+    SHLegacyValue checkedThis) {
+  if (!_sh_ljs_is_empty(checkedThis))
+    _sh_throw_this_already_initialized(shr);
+}
 
 /// Performs a function call. The new frame is at the top of the stack.
 /// Arguments, this, and callee must be populated.
@@ -395,6 +431,17 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_call_builtin(
 
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_get_builtin_closure(SHRuntime *shr, uint32_t builtinMethodID);
+
+/// Semantically equivalent to calling \p requireFunc with the argument
+/// \p modIndex.  Assumes that \p requireFunc is the metro require function,
+/// and may cache the result for a given \p modIndex.
+/// The \p cacheData argument is currently unused, but will be used in a
+/// later diff to provide caching.
+SHERMES_EXPORT SHLegacyValue _sh_ljs_callRequire(
+    SHRuntime *shr,
+    SHArrayStorage **exportCache,
+    SHLegacyValue *requireFunc,
+    uint32_t modIndex);
 
 /// Create a new environment with the specified \p size and \p parentEnv (which
 /// may be null if this is a top level environment).
@@ -463,6 +510,18 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_create_generator_object(
     SHLegacyValue (*func)(SHRuntime *),
     const SHNativeFuncInfo *funcInfo,
     const SHUnit *unit);
+
+/// Create a class.
+/// \param env Should not be null.
+/// \param funcInfo Should not be null.
+SHERMES_EXPORT SHLegacyValue _sh_ljs_create_class(
+    SHRuntime *shr,
+    const SHLegacyValue *env,
+    SHLegacyValue (*func)(SHRuntime *),
+    const SHNativeFuncInfo *funcInfo,
+    const SHUnit *unit,
+    SHLegacyValue *homeObjectOut,
+    SHLegacyValue *superClass);
 
 SHERMES_EXPORT SHLegacyValue _sh_ljs_get_global_object(SHRuntime *shr);
 SHERMES_EXPORT void _sh_ljs_declare_global_var(SHRuntime *shr, SHSymbolID name);
@@ -588,6 +647,9 @@ _sh_ljs_create_regexp(SHRuntime *shr, SHSymbolID pattern, SHSymbolID flags);
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_create_bigint(SHRuntime *shr, const uint8_t *value, uint32_t size);
 
+SHERMES_EXPORT SHLegacyValue
+_sh_ljs_to_property_key(SHRuntime *shr, const SHLegacyValue *val);
+
 SHERMES_EXPORT double _sh_ljs_to_double_rjs(
     SHRuntime *shr,
     const SHLegacyValue *n);
@@ -681,6 +743,7 @@ SHERMES_EXPORT SHLegacyValue
 _sh_string_concat(SHRuntime *shr, uint32_t argCount, ...);
 
 SHERMES_EXPORT SHLegacyValue _sh_ljs_typeof(SHRuntime *shr, SHLegacyValue *v);
+SHERMES_EXPORT bool _sh_ljs_typeof_is(SHLegacyValue val, uint16_t types);
 
 SHERMES_EXPORT SHLegacyValue _sh_ljs_new_object(SHRuntime *shr);
 SHERMES_EXPORT SHLegacyValue
@@ -707,6 +770,18 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_new_array_with_buffer(
     uint32_t numElements,
     uint32_t numLiterals,
     uint32_t bufferIndex);
+
+/// \p thisArg is "this" parameter to the function.
+/// \p newTarget is the new.target value in the function.
+/// \p shapeTableIndex is the index into the shape table where the serialized
+///   keys for this operation are stored.
+/// \return \p thisArg.
+SHERMES_EXPORT SHLegacyValue _sh_ljs_cache_new_object(
+    SHRuntime *shr,
+    SHUnit *unit,
+    SHLegacyValue *thisArg,
+    SHLegacyValue *newTarget,
+    uint32_t shapeTableIndex);
 
 /// \return a newly created fast array with the given \p capacity.
 SHERMES_EXPORT SHLegacyValue

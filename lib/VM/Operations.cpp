@@ -7,6 +7,7 @@
 
 #include "hermes/VM/Operations.h"
 
+#include "hermes/FrontEndDefs/Typeof.h"
 #include "hermes/Support/Conversions.h"
 #include "hermes/Support/OSCompat.h"
 #include "hermes/VM/BigIntPrimitive.h"
@@ -92,6 +93,37 @@ HermesValue typeOf(Runtime &runtime, Handle<> valueHandle) {
       assert(valueHandle->isNumber() && "Invalid type.");
       return HermesValue::encodeStringValue(
           runtime.getPredefinedString(Predefined::number));
+  }
+}
+
+bool matchTypeOfIs(HermesValue arg, TypeOfIsTypes types) {
+  switch (arg.getETag()) {
+    case HermesValue::ETag::Undefined:
+      return types.hasUndefined();
+    case HermesValue::ETag::Null:
+      return types.hasNull();
+    case HermesValue::ETag::Str1:
+    case HermesValue::ETag::Str2:
+      return types.hasString();
+    case HermesValue::ETag::BigInt1:
+    case HermesValue::ETag::BigInt2:
+      return types.hasBigint();
+    case HermesValue::ETag::Bool:
+      return types.hasBoolean();
+    case HermesValue::ETag::Symbol:
+      return types.hasSymbol();
+    case HermesValue::ETag::Object1:
+    case HermesValue::ETag::Object2: {
+      CellKind kind = static_cast<GCCell *>(arg.getObject())->getKind();
+      // Check the CellKind to avoid having to include Callable.h here.
+      if (CellKind::CallableKind_first <= kind &&
+          kind <= CellKind::CallableKind_last)
+        return types.hasFunction();
+      else
+        return types.hasObject();
+    }
+    default:
+      return types.hasNumber();
   }
 }
 
@@ -284,7 +316,7 @@ bool toBoolean(HermesValue value) {
 }
 
 /// ES5.1 9.8.1
-static CallResult<PseudoHandle<StringPrimitive>> numberToString(
+CallResult<PseudoHandle<StringPrimitive>> numberToStringPrimitive(
     Runtime &runtime,
     double m) {
   char buf8[hermes::NUMBER_TO_STRING_BUF_SIZE];
@@ -379,7 +411,7 @@ CallResult<PseudoHandle<StringPrimitive>> toString_RJS(
     case HermesValue::ETag::Symbol:
       return runtime.raiseTypeError("Cannot convert Symbol to string");
     default:
-      return numberToString(runtime, value.getNumber());
+      return numberToStringPrimitive(runtime, value.getNumber());
   }
 
   return createPseudoHandle(result);
@@ -2470,6 +2502,21 @@ ExecutionStatus setTemplateObjectProps(
 
 using namespace hermes::vm;
 
+extern "C" SHLegacyValue _sh_ljs_to_property_key(
+    SHRuntime *shr,
+    const SHLegacyValue *val) {
+  Runtime &runtime = getRuntime(shr);
+  CallResult<HermesValue> ret{ExecutionStatus::EXCEPTION};
+  {
+    GCScopeMarkerRAII marker{runtime};
+    ret =
+        toPropertyKey(runtime, Handle<>(toPHV(val))).toCallResultHermesValue();
+  }
+  if (LLVM_UNLIKELY(ret == ExecutionStatus::EXCEPTION))
+    _sh_throw_current(shr);
+  return *ret;
+}
+
 extern "C" double _sh_ljs_to_double_rjs(
     SHRuntime *shr,
     const SHLegacyValue *n) {
@@ -2965,6 +3012,12 @@ extern "C" bool _sh_ljs_strict_equal(SHLegacyValue a, SHLegacyValue b) {
 
 extern "C" SHLegacyValue _sh_ljs_typeof(SHRuntime *shr, SHLegacyValue *v) {
   return typeOf(getRuntime(shr), Handle<>::vmcast(toPHV(v)));
+}
+
+extern "C" bool _sh_ljs_typeof_is(SHLegacyValue val, uint16_t typesRaw) {
+  hermes::TypeOfIsTypes types(typesRaw);
+  HermesValue hv = HermesValue::fromRaw(val.raw);
+  return matchTypeOfIs(hv, types);
 }
 
 extern "C" SHLegacyValue _sh_ljs_add_empty_string_rjs(

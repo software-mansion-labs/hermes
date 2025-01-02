@@ -187,8 +187,16 @@ class IRBuilder {
   /// Create a new literal null.
   LiteralNull *getLiteralNull();
 
+  LiteralBuiltinIdx *getLiteralBuiltinIdx(BuiltinMethod::Enum builtinIdx) {
+    return M->getLiteralBuiltinIdx(builtinIdx);
+  }
+
   LiteralIRType *getLiteralIRType(Type type) {
     return M->getLiteralIRType(type);
+  }
+
+  LiteralTypeOfIsTypes *getLiteralTypeOfIsTypes(TypeOfIsTypes types) {
+    return M->getLiteralTypeOfIsTypes(types);
   }
 
   /// Return the GlobalObject value.
@@ -280,6 +288,8 @@ class IRBuilder {
 
   AllocStackInst *createAllocStackInst(Identifier varName, Type type);
 
+  ToPropertyKeyInst *createToPropertyKeyInst(Value *val);
+
   AsNumberInst *createAsNumberInst(Value *val);
 
   AsNumericInst *createAsNumericInst(Value *val);
@@ -287,6 +297,12 @@ class IRBuilder {
   AsInt32Inst *createAsInt32Inst(Value *val);
 
   AddEmptyStringInst *createAddEmptyStringInst(Value *val);
+
+  CreateClassInst *createCreateClassInst(
+      BaseScopeInst *scope,
+      Function *code,
+      Value *superClass,
+      AllocStackInst *homeObjectOutput);
 
   CreateFunctionInst *createCreateFunctionInst(
       Instruction *scope,
@@ -381,6 +397,12 @@ class IRBuilder {
 
   TryEndInst *createTryEndInst(BasicBlock *catchBlock, BasicBlock *branchBlock);
 
+  BranchIfBuiltinInst *createBranchIfBuiltinInst(
+      BuiltinMethod::Enum builtinIndex,
+      Value *argument,
+      BasicBlock *catchBlock,
+      BasicBlock *branchBlock);
+
   DeletePropertyInst *createDeletePropertyInst(Value *object, Value *property);
   DeletePropertyLooseInst *createDeletePropertyLooseInst(
       Value *object,
@@ -419,18 +441,18 @@ class IRBuilder {
       Value *storedValue,
       LiteralString *property);
 
-  StoreOwnPropertyInst *createStoreOwnPropertyInst(
+  DefineOwnPropertyInst *createDefineOwnPropertyInst(
       Value *storedValue,
       Value *object,
       Value *property,
       PropEnumerable isEnumerable);
-  StoreNewOwnPropertyInst *createStoreNewOwnPropertyInst(
+  DefineNewOwnPropertyInst *createDefineNewOwnPropertyInst(
       Value *storedValue,
       Value *object,
       Literal *property,
       PropEnumerable isEnumerable);
 
-  StoreGetterSetterInst *createStoreGetterSetterInst(
+  DefineOwnGetterSetterInst *createDefineOwnGetterSetterInst(
       Value *storedGetter,
       Value *storedSetter,
       Value *object,
@@ -494,11 +516,15 @@ class IRBuilder {
 
   ThrowIfInst *createThrowIfInst(Value *checkedValue, Type invalidTypes);
 
+  ThrowIfThisInitializedInst *createThrowIfThisInitializedInst(
+      Value *subclassCheckedThis);
+
   HBCGetGlobalObjectInst *createHBCGetGlobalObjectInst();
 
   CreateRegExpInst *createRegExpInst(Identifier pattern, Identifier flags);
 
   TypeOfInst *createTypeOfInst(Value *input);
+  TypeOfIsInst *createTypeOfIsInst(Value *input, LiteralTypeOfIsTypes *types);
 
   UnaryOperatorInst *createUnaryOperatorInst(
       Value *value,
@@ -630,6 +656,11 @@ class IRBuilder {
       ValueKind kind,
       BasicBlock *trueBlock,
       BasicBlock *falseBlock);
+  HBCCmpBrTypeOfIsInst *createHBCCmpBrTypeOfIsInst(
+      Value *arg,
+      LiteralTypeOfIsTypes *types,
+      BasicBlock *trueBlock,
+      BasicBlock *falseBlock);
 
   IteratorBeginInst *createIteratorBeginInst(AllocStackInst *sourceOrNext);
 
@@ -640,6 +671,11 @@ class IRBuilder {
   IteratorCloseInst *createIteratorCloseInst(
       Value *iterator,
       bool ignoreInnerException);
+
+  CacheNewObjectInst *createCacheNewObjectInst(
+      Value *thisParameter,
+      Value *newTarget,
+      llvh::ArrayRef<LiteralString *> keys);
 
   UnreachableInst *createUnreachableInst();
 
@@ -709,6 +745,8 @@ class IRBuilder {
       Value *capturedNewTarget,
       Variable *capturedArguments,
       Variable *homeObject,
+      Variable *classCtxConstructor,
+      Variable *classCtxInitFuncVar,
       VariableScope *parentVarScope);
 
   EvalCompilationDataInst *createEvalCompilationDataInst(
@@ -717,6 +755,8 @@ class IRBuilder {
       Value *capturedNewTarget,
       Variable *capturedArguments,
       Variable *homeObject,
+      Variable *classCtxConstructor,
+      Variable *classCtxInitFuncVar,
       VariableScope *funcVarScope);
 
   /// This is an RAII object that saves and restores the source location of the

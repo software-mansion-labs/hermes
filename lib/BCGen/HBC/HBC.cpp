@@ -17,8 +17,6 @@
 
 #include "llvh/Support/raw_ostream.h"
 
-#include <future>
-
 #define DEBUG_TYPE "hbc-backend"
 
 namespace hermes {
@@ -66,21 +64,6 @@ std::unique_ptr<BytecodeModule> generateBytecodeModuleForEval(
 }
 
 namespace {
-
-/// Execute a function in a SerialExecutor, blocking until the function
-/// completes.
-/// \param executor the executor to use.
-/// \param f the function to execute.
-/// \param data the data to pass to the function.
-static void executeBlockingInSerialExecutor(
-    SerialExecutor &executor,
-    void (*f)(void *),
-    void *data) {
-  std::packaged_task<void()> task([f, data]() { f(data); });
-  auto future = task.get_future();
-  executor.add([&task]() { task(); });
-  future.wait();
-}
 
 /// Data for the compileLazyFunctionWorker.
 class LazyCompilationThreadData {
@@ -359,11 +342,9 @@ std::pair<bool, llvh::StringRef> compileLazyFunction(
     return {false, *errMsgOpt};
   }
 
-  // Run on a thread to prevent stack overflow if this is run from deep inside
-  // JS execution.
+  // Use this callback-style API to reduce conflicts with stable for now.
   LazyCompilationThreadData data{provider, funcID};
-  executeBlockingInSerialExecutor(
-      provider->getSerialExecutor(), compileLazyFunctionWorker, &data);
+  compileLazyFunctionWorker(&data);
 
   if (data.success) {
     return std::make_pair(true, llvh::StringRef{});
@@ -424,11 +405,9 @@ std::pair<std::unique_ptr<BCProviderFromSrc>, std::string> compileEvalModule(
     hbc::BCProviderFromSrc *provider,
     uint32_t enclosingFuncID,
     const CompileFlags &compileFlags) {
-  // Run on a thread to prevent stack overflow if this is run from deep inside
-  // JS execution.
+  // Use this callback-style API to reduce conflicts with stable for now.
   EvalThreadData data{std::move(src), provider, enclosingFuncID, compileFlags};
-  executeBlockingInSerialExecutor(
-      provider->getSerialExecutor(), compileEvalWorker, &data);
+  compileEvalWorker(&data);
 
   return data.success
       ? std::make_pair(std::move(data.result), "")

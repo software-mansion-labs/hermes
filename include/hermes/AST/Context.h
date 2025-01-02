@@ -70,6 +70,9 @@ struct OptimizationSettings {
   /// Attempt to resolve CommonJS require() calls at compile time.
   bool staticRequire{false};
 
+  /// If true, optimize Metro require calls into bytecodes.
+  bool metroRequireOpt{false};
+
   /// Whether to use old Mem2Reg pass instead of SimpleMem2Reg. This may produce
   /// better code for irreducible CFGs.
   bool useLegacyMem2Reg{false};
@@ -222,6 +225,10 @@ class Context {
 
   /// If true, allow parsing component syntax when also using Flow syntax.
   bool parseFlowComponentSyntax_{false};
+
+  /// If true, allow parsing match statements and expressions when
+  /// also using Flow syntax.
+  bool parseFlowMatch_{false};
 
   /// Whether to parse Flow type syntax.
   ParseFlowSetting parseFlow_{ParseFlowSetting::NONE};
@@ -403,6 +410,13 @@ class Context {
     return parseFlowComponentSyntax_;
   }
 
+  void setParseFlowMatch(bool parseFlowMatch) {
+    parseFlowMatch_ = parseFlowMatch;
+  }
+  bool getParseFlowMatch() const {
+    return parseFlowMatch_;
+  }
+
   void setParseTS(bool parseTS) {
     parseTS_ = parseTS;
   }
@@ -481,6 +495,14 @@ class Context {
 
   bool getStaticBuiltinOptimization() const {
     return optimizationSettings_.staticBuiltins;
+  }
+
+  void setMetroRequireOpt(bool metroRequireOpt) {
+    optimizationSettings_.metroRequireOpt = metroRequireOpt;
+  }
+
+  bool getMetroRequireOpt() const {
+    return optimizationSettings_.metroRequireOpt;
   }
 
   const CodeGenerationSettings &getCodeGenerationSettings() const {

@@ -1047,6 +1047,66 @@ CallResult<PseudoHandle<>> NativeJSFunction::_callImpl(
 }
 
 //===----------------------------------------------------------------------===//
+// class NativeJSDerivedClass
+
+const CallableVTable NativeJSDerivedClass::vt{
+    {
+        VTable(
+            CellKind::NativeJSDerivedClassKind,
+            cellSize<NativeJSDerivedClass>(),
+            nullptr,
+            nullptr,
+            nullptr
+#ifdef HERMES_MEMORY_INSTRUMENTATION
+            ,
+            VTable::HeapSnapshotMetadata{
+                HeapSnapshot::NodeType::Closure,
+                NativeJSDerivedClass::_snapshotNameImpl,
+                NativeJSDerivedClass::_snapshotAddEdgesImpl,
+                nullptr,
+                nullptr}
+#endif
+            ),
+        NativeJSDerivedClass::_getOwnIndexedRangeImpl,
+        NativeJSDerivedClass::_haveOwnIndexedImpl,
+        NativeJSDerivedClass::_getOwnIndexedPropertyFlagsImpl,
+        NativeJSDerivedClass::_getOwnIndexedImpl,
+        NativeJSDerivedClass::_setOwnIndexedImpl,
+        NativeJSDerivedClass::_deleteOwnIndexedImpl,
+        NativeJSDerivedClass::_checkAllOwnIndexedImpl,
+    },
+    NativeJSDerivedClass::_callImpl};
+
+void NativeJSDerivedClassBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
+  mb.addJSObjectOverlapSlots(JSObject::numOverlapSlots<NativeJSDerivedClass>());
+  NativeJSFunctionBuildMeta(cell, mb);
+  mb.setVTable(&NativeJSDerivedClass::vt);
+}
+
+Handle<NativeJSDerivedClass> NativeJSDerivedClass::create(
+    Runtime &runtime,
+    Handle<JSObject> parentHandle,
+    Handle<Environment> parentEnvHandle,
+    NativeJSFunctionPtr functionPtr,
+    const SHNativeFuncInfo *funcInfo,
+    const SHUnit *unit,
+    unsigned additionalSlotCount) {
+  auto *cell = runtime.makeAFixed<NativeJSDerivedClass>(
+      runtime,
+      parentHandle,
+      runtime.getHiddenClassForPrototype(
+          *parentHandle,
+          numOverlapSlots<NativeJSDerivedClass>() + additionalSlotCount),
+      parentEnvHandle,
+      functionPtr,
+      funcInfo,
+      unit);
+  auto selfHandle = JSObjectInit::initToHandle(runtime, cell);
+  selfHandle->flags_.lazyObject = 1;
+  return selfHandle;
+}
+
+//===----------------------------------------------------------------------===//
 // class NativeFunction
 
 const CallableVTable NativeFunction::vt{
@@ -1272,7 +1332,13 @@ CallResult<PseudoHandle<>> NativeConstructor::_callImpl(
       newTarget.isUndefined() ||
       vmisa<Callable>(newTarget) &&
           "new.target for a NativeConstructor should either be undefined or a callable");
-  return NativeFunction::_callImpl(selfHandle, runtime);
+  auto res = NativeFunction::_callImpl(selfHandle, runtime);
+  if (LLVM_LIKELY(res != ExecutionStatus::EXCEPTION)) {
+    assert(
+        (newTarget.isUndefined() || vmisa<JSObject>(res->getHermesValue())) &&
+        "NativeConstructor needs to return an object when called as constructor.");
+  }
+  return res;
 }
 #endif
 
@@ -1418,6 +1484,62 @@ void JSFunction::_snapshotAddLocationsImpl(
   self->addLocationToSnapshot(snap, gc.getObjectID(self), gc);
 }
 #endif
+
+//===----------------------------------------------------------------------===//
+// class JSDerivedClass
+
+const CallableVTable JSDerivedClass::vt{
+    {
+        VTable(
+            CellKind::JSDerivedClassKind,
+            cellSize<JSDerivedClass>(),
+            nullptr,
+            nullptr,
+            nullptr
+#ifdef HERMES_MEMORY_INSTRUMENTATION
+            ,
+            VTable::HeapSnapshotMetadata{
+                HeapSnapshot::NodeType::Closure,
+                JSDerivedClass::_snapshotNameImpl,
+                JSDerivedClass::_snapshotAddEdgesImpl,
+                nullptr,
+                JSDerivedClass::_snapshotAddLocationsImpl}
+#endif
+            ),
+        JSDerivedClass::_getOwnIndexedRangeImpl,
+        JSDerivedClass::_haveOwnIndexedImpl,
+        JSDerivedClass::_getOwnIndexedPropertyFlagsImpl,
+        JSDerivedClass::_getOwnIndexedImpl,
+        JSDerivedClass::_setOwnIndexedImpl,
+        JSDerivedClass::_deleteOwnIndexedImpl,
+        JSDerivedClass::_checkAllOwnIndexedImpl,
+    },
+    JSDerivedClass::_callImpl};
+
+void JSDerivedClassBuildMeta(const GCCell *cell, Metadata::Builder &mb) {
+  mb.addJSObjectOverlapSlots(JSObject::numOverlapSlots<JSDerivedClass>());
+  JSFunctionBuildMeta(cell, mb);
+  mb.setVTable(&JSDerivedClass::vt);
+}
+
+PseudoHandle<JSDerivedClass> JSDerivedClass::create(
+    Runtime &runtime,
+    Handle<Domain> domain,
+    Handle<JSObject> parentHandle,
+    Handle<Environment> envHandle,
+    CodeBlock *codeBlock) {
+  auto *cell = runtime.makeAFixed<JSDerivedClass, kHasFinalizer>(
+      runtime,
+      domain,
+      parentHandle,
+      runtime.getHiddenClassForPrototype(
+          *parentHandle, numOverlapSlots<JSDerivedClass>()),
+      envHandle,
+      codeBlock);
+  auto self = JSObjectInit::initToPseudoHandle(runtime, cell);
+  self->flags_.lazyObject = 1;
+  return self;
+}
 
 } // namespace vm
 } // namespace hermes

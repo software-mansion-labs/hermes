@@ -67,14 +67,28 @@ FuncIsArrow SemContext::nodeIsArrow(ESTree::Node *node) {
   return FuncIsArrow::No;
 }
 
+FunctionInfo *SemContext::nearestNonArrow(FunctionInfo *info) {
+  FunctionInfo *cur = info;
+  auto *global = getGlobalFunction();
+  // Top-level root program nodes that are not the global function are debugger
+  // eval functions. We don't want to consider these when trying to find the
+  // nearest non-arrow.
+  while (cur->arrow || (cur->isProgramNode && cur != global)) {
+    cur = cur->parentFunction;
+  }
+  assert(cur && "All FunctionInfo should have a non-arrow ancestor.");
+  return cur;
+}
+
 FunctionInfo *SemContext::newFunction(
     FuncIsArrow isArrow,
+    FunctionInfo::ConstructorKind consKind,
     FunctionInfo *parentFunction,
     LexicalScope *parentScope,
     bool strict,
     CustomDirectives customDirectives) {
   functions_.emplace_back(
-      isArrow, parentFunction, parentScope, strict, customDirectives);
+      isArrow, consKind, parentFunction, parentScope, strict, customDirectives);
   return &functions_.back();
 }
 

@@ -109,6 +109,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "hermes/Support/sh_tryfast_fp_cvt.h"
 #include "hermes/VM/sh_config.h"
 
 #ifdef __cplusplus
@@ -259,6 +260,9 @@ static inline bool _sh_ljs_is_empty(SHLegacyValue v) {
 static inline bool _sh_ljs_is_bool(SHLegacyValue v) {
   return _sh_ljs_get_etag(v) == HVETag_Bool;
 }
+static inline bool _sh_ljs_is_symbol(SHLegacyValue v) {
+  return _sh_ljs_get_etag(v) == HVETag_Symbol;
+}
 static inline bool _sh_ljs_is_object(SHLegacyValue v) {
   return _sh_ljs_get_tag(v) == HVTag_Object;
 }
@@ -297,45 +301,112 @@ static inline uint32_t _sh_ljs_get_native_uint32(SHLegacyValue v) {
   return v.raw;
 }
 
+/// Test whether the value is a non-NaN number. Since we use
+/// NaN-boxing, this just checks if the parameter is NaN, which can have
+/// some performance advantages over _sh_ljs_is_double():
+///  1. Checking for NaN is typically a single instruction.
+///  2. The operation is done in a floating point register, which may avoid
+///     some moves if other users of the value are floating point operations.
+static inline bool _sh_ljs_is_non_nan_number(SHLegacyValue v) {
+  double d = v.f64;
+  // NaN is the only double value that does not compare equal to itself.
+  return d == d;
+}
+
+/// If the value is a number that can be efficiently truncated to a 32 bit
+/// number, return true and store the result in \p res. Otherwise, return
+/// false and leave \p res in an unspecified state.
+static inline bool _sh_ljs_tryfast_truncate_to_int32(
+    SHLegacyValue v,
+    int32_t *res) {
+// If we are compiling with ARM v8.3 or above, there is a special instruction
+// to do the conversion.
+#ifdef __ARM_FEATURE_JCVT
+  if (!_sh_ljs_is_non_nan_number(v))
+    return false;
+  *res = __builtin_arm_jcvt(v.f64);
+  return true;
+#endif
+
+  // Since we use NaN-boxing for non-number values, we know that any
+  // non-number values will fail the attempted conversion to int32. So we can
+  // simply attempt the conversion without checking for numbers.
+  if (HERMES_TRYFAST_F64_TO_64_IS_FAST) {
+    int64_t fast = _sh_tryfast_f64_to_i64_cvt(v.f64);
+    *res = (int32_t)fast;
+    return (double)fast == v.f64;
+  } else {
+    *res = _sh_tryfast_f64_to_i32_cvt(v.f64);
+    return (double)*res == v.f64;
+  }
+}
+
+/// Test whether the given HermesValues are both non-NaN number values.
+/// Since we use NaN-boxing, this just checks if either parameter is NaN, which
+/// can have some performance advantages over _sh_ljs_is_double():
+///  1. This can typically be done with a single comparison if the
+///     architecture provides a condition code that is set if either
+///     operand to a comparison is NaN (e.g. VS on ARM).
+///  2. The operation is done in a floating point register, which may avoid
+///     some moves if other users of the value are floating point operations.
+static inline bool _sh_ljs_are_both_non_nan_numbers(
+    SHLegacyValue a,
+    SHLegacyValue b) {
+  // We do not use isunordered() here because it may produce a call on some
+  // compilers (e.g. MSVC). Instead, we use a builtin when it is available, or
+  // fall back to checking each operand for NaN if it is not.
+#ifdef __has_builtin
+#if __has_builtin(__builtin_isunordered)
+  return !__builtin_isunordered(a.f64, b.f64);
+#endif
+#endif
+  return _sh_ljs_is_non_nan_number(a) && _sh_ljs_is_non_nan_number(b);
+}
+
 /// Flags associated with an object.
-typedef struct SHObjectFlags {
-  /// New properties cannot be added.
-  uint32_t noExtend : 1;
+typedef union {
+  struct {
+    /// New properties cannot be added.
+    uint32_t noExtend : 1;
 
-  /// \c Object.seal() has been invoked on this object, marking all properties
-  /// as non-configurable. When \c Sealed is set, \c NoExtend is always set too.
-  uint32_t sealed : 1;
+    /// \c Object.seal() has been invoked on this object, marking all properties
+    /// as non-configurable. When \c Sealed is set, \c NoExtend is always set
+    /// too.
+    uint32_t sealed : 1;
 
-  /// \c Object.freeze() has been invoked on this object, marking all properties
-  /// as non-configurable and non-writable. When \c Frozen is set, \c Sealed and
-  /// must \c NoExtend are always set too.
-  uint32_t frozen : 1;
+    /// \c Object.freeze() has been invoked on this object, marking all
+    /// properties as non-configurable and non-writable. When \c Frozen is set,
+    /// \c Sealed and must \c NoExtend are always set too.
+    uint32_t frozen : 1;
 
-  /// This object has indexed storage. This flag will not change at runtime, it
-  /// is set at construction and its value never changes. It is not a state.
-  uint32_t indexedStorage : 1;
+    /// This object has indexed storage. This flag will not change at runtime,
+    /// it is set at construction and its value never changes. It is not a
+    /// state.
+    uint32_t indexedStorage : 1;
 
-  /// This flag is set to true when \c IndexedStorage is true and
-  /// \c class->hasIndexLikeProperties are false. It allows our fast paths to do
-  /// a simple bit check.
-  uint32_t fastIndexProperties : 1;
+    /// This flag is set to true when \c IndexedStorage is true and
+    /// \c class->hasIndexLikeProperties are false. It allows our fast paths to
+    /// do a simple bit check.
+    uint32_t fastIndexProperties : 1;
 
-  /// This flag indicates this is a special object whose properties are
-  /// managed by C++ code, and not via the standard property storage
-  /// mechanisms.
-  uint32_t hostObject : 1;
+    /// This flag indicates this is a special object whose properties are
+    /// managed by C++ code, and not via the standard property storage
+    /// mechanisms.
+    uint32_t hostObject : 1;
 
-  /// this is lazily created object that must be initialized before it can be
-  /// used. Note that lazy objects must have no properties defined on them,
-  uint32_t lazyObject : 1;
+    /// this is lazily created object that must be initialized before it can be
+    /// used. Note that lazy objects must have no properties defined on them,
+    uint32_t lazyObject : 1;
 
-  /// This flag indicates this is a proxy exotic Object
-  uint32_t proxyObject : 1;
+    /// This flag indicates this is a proxy exotic Object
+    uint32_t proxyObject : 1;
 
-  /// A non-zero object id value, assigned lazily. It is 0 before it is
-  /// assigned. If an object started out as lazy, the objectID is the lazy
-  /// object index used to identify when it gets initialized.
-  uint32_t objectID : 24;
+    /// A non-zero object id value, assigned lazily. It is 0 before it is
+    /// assigned. If an object started out as lazy, the objectID is the lazy
+    /// object index used to identify when it gets initialized.
+    uint32_t objectID : 24;
+  };
+  uint32_t bits;
 } SHObjectFlags;
 
 #ifdef __cplusplus

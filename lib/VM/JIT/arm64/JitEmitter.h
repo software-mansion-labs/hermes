@@ -440,6 +440,9 @@ class Emitter {
   /// argc is a register.
   void callWithNewTargetLong(FR frRes, FR frCallee, FR frNewTarget, FR frArgc);
 
+  /// Special bytecode for calling Metro require.
+  void callRequire(FR frRes, FR frRequireFunc, uint32_t modIndex);
+
   /// Get a builtin closure.
   void getBuiltinClosure(FR frRes, uint32_t builtinIndex);
 
@@ -553,6 +556,11 @@ class Emitter {
   void jmpTrueFalse(bool onTrue, const asmjit::Label &target, FR frInput);
   void jmpUndefined(const asmjit::Label &target, FR frInput);
   void jmp(const asmjit::Label &target);
+  void jmpBuiltinIs(
+      bool invert,
+      const asmjit::Label &target,
+      uint8_t builtinIndex,
+      FR frInput);
 
   void booleanNot(FR frRes, FR frInput);
   void bitNot(FR frRes, FR frInput);
@@ -560,6 +568,8 @@ class Emitter {
 
   void getPNameList(FR frRes, FR frObj, FR frIdx, FR frSize);
   void getNextPName(FR frRes, FR frProps, FR frObj, FR frIdx, FR frSize);
+
+  void toPropertyKey(FR frRes, FR frVal);
 
 #define DECL_COMPARE(                                                   \
     methodName, commentStr, slowCall, condCode, invSlow, passArgsByVal) \
@@ -647,6 +657,11 @@ class Emitter {
   DECL_JCOND(jStrictEqual, false, true, "strict_eq", _sh_ljs_strict_equal, kEQ)
 #undef DECL_JCOND
 
+  void
+  jmpTypeOfIs(const asmjit::Label &target, FR frInput, TypeOfIsTypes types);
+
+  void typeOfIs(FR frRes, FR frInput, TypeOfIsTypes types);
+
   void switchImm(
       FR frInput,
       const asmjit::Label &defaultLabel,
@@ -693,9 +708,9 @@ class Emitter {
       "tryPutByIdStrict",
       _sh_ljs_try_put_by_id_strict_rjs);
 
-  void putOwnByIndex(FR frTarget, FR frValue, uint32_t key);
-  void putOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable);
-  void putOwnGetterSetterByVal(
+  void defineOwnByIndex(FR frTarget, FR frValue, uint32_t key);
+  void defineOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable);
+  void defineOwnGetterSetterByVal(
       FR frTarget,
       FR frKey,
       FR frGetter,
@@ -707,21 +722,7 @@ class Emitter {
   void getOwnBySlotIdx(FR frRes, FR frTarget, uint32_t slotIdx);
   void putOwnBySlotIdx(FR frTarget, FR frValue, uint32_t slotIdx);
 
-#define DECL_DEL_BY_ID(methodName, commentStr, shFn)            \
-  void methodName(FR frRes, FR frTarget, SHSymbolID key) {      \
-    delByIdImpl(frRes, frTarget, key, commentStr, shFn, #shFn); \
-  }
-
-  DECL_DEL_BY_ID(delByIdLoose, "delByIdLoose", _sh_ljs_del_by_id_loose);
-  DECL_DEL_BY_ID(delByIdStrict, "delByIdStrict", _sh_ljs_del_by_id_strict);
-
-#define DECL_DEL_BY_VAL(methodName, commentStr, shFn)              \
-  void methodName(FR frRes, FR frTarget, FR frKey) {               \
-    delByValImpl(frRes, frTarget, frKey, commentStr, shFn, #shFn); \
-  }
-
-  DECL_DEL_BY_VAL(delByValLoose, "delByValLoose", _sh_ljs_del_by_val_loose);
-  DECL_DEL_BY_VAL(delByValStrict, "delByValStrict", _sh_ljs_del_by_val_strict);
+  void delByVal(FR frRes, FR frTarget, FR frKey, bool strict);
 
   void instanceOf(FR frRes, FR frLeft, FR frRight);
   void isIn(FR frRes, FR frLeft, FR frRight);
@@ -763,6 +764,9 @@ class Emitter {
       FR frEnv,
       RuntimeModule *runtimeModule,
       uint32_t functionID);
+  void createBaseClass(FR frRes, FR frPrototypeOut, FR frEnv);
+  void
+  createDerivedClass(FR frRes, FR frPrototypeOut, FR frEnv, FR frSuperClass);
   void createGenerator(
       FR frRes,
       FR frEnv,
@@ -807,6 +811,7 @@ class Emitter {
   void debugger();
   void throwInst(FR frInput);
   void throwIfEmpty(FR frRes, FR frInput);
+  void throwIfThisInitialized(FR frInput);
 
   void createRegExp(
       FR frRes,
@@ -1141,24 +1146,6 @@ class Emitter {
           SHLegacyValue *target,
           SHLegacyValue *key,
           SHLegacyValue *value),
-      const char *shImplName);
-
-  void delByIdImpl(
-      FR frRes,
-      FR frTarget,
-      SHSymbolID key,
-      const char *name,
-      SHLegacyValue (
-          *shImpl)(SHRuntime *shr, SHLegacyValue *target, SHSymbolID key),
-      const char *shImplName);
-
-  void delByValImpl(
-      FR frRes,
-      FR frTarget,
-      FR frKey,
-      const char *name,
-      SHLegacyValue (
-          *shImpl)(SHRuntime *shr, SHLegacyValue *target, SHLegacyValue *key),
       const char *shImplName);
 
   void getByIdImpl(

@@ -86,7 +86,7 @@ static constexpr uint32_t kMaxSupportedNumRegisters =
 /// The minimum stack gap allowed from RuntimeConfig.
 static constexpr uint32_t kMinSupportedNativeStackGap =
 #if LLVM_ADDRESS_SANITIZER_BUILD
-    512 * 1024;
+    256 * 1024;
 #else
     64 * 1024;
 #endif
@@ -298,6 +298,8 @@ Runtime::Runtime(
       overflowGuard_(StackOverflowGuard::depthCounterGuard(
           Runtime::MAX_NATIVE_CALL_FRAME_DEPTH)),
 #endif
+      builtins_(static_cast<Callable **>(
+          checkedCalloc(BuiltinMethod::_count, sizeof(Callable *)))),
       crashCallbackKey_(
           crashMgr_->registerCallback([this](int fd) { crashCallback(fd); })),
       codeCoverageProfiler_(std::make_unique<CodeCoverageProfiler>(*this)),
@@ -427,7 +429,7 @@ Runtime::Runtime(
   codeCoverageProfiler_->restore();
 
   // Populate JS builtins returned from internal bytecode to the builtins table.
-  initJSBuiltins(builtins_, jsBuiltinsObj);
+  initJSBuiltins(jsBuiltinsObj);
 
 #if HERMESVM_SAMPLING_PROFILER_AVAILABLE
   if (runtimeConfig.getEnableSampleProfiling())
@@ -593,8 +595,8 @@ void Runtime::markRoots(
   {
     MarkRootsPhaseTimer timer(*this, RootAcceptor::Section::Builtins);
     acceptor.beginRootSection(RootAcceptor::Section::Builtins);
-    for (Callable *&f : builtins_)
-      acceptor.acceptPtr(f);
+    for (size_t i = 0; i < BuiltinMethod::_count; ++i)
+      acceptor.acceptPtr(builtins_[i]);
     acceptor.endRootSection();
   }
 
@@ -798,6 +800,14 @@ void Runtime::removeRuntimeModule(RuntimeModule *rm) {
 }
 
 #ifndef NDEBUG
+void Runtime::assertTopCodeBlockContainsIP(const inst::Inst *ip) const {
+  // Check that if the topmost function is currently a JSFunction, then the IP
+  // is in that function.
+  if (currentFrame_ != StackFramePtr(registerStackStart_))
+    if (auto *codeBlock = currentFrame_.getCalleeCodeBlock())
+      assert(codeBlock->contains(ip) && "IP not in CodeBlock");
+}
+
 void Runtime::printArrayCensus(llvh::raw_ostream &os) {
   // Do array capacity histogram.
   // Map from array size to number of arrays that are that size.
@@ -1737,8 +1747,6 @@ ExecutionStatus Runtime::forEachPublicNativeBuiltin(
 void Runtime::initNativeBuiltins() {
   GCScopeMarkerRAII gcScope{*this};
 
-  builtins_.resize(BuiltinMethod::_count);
-
   (void)forEachPublicNativeBuiltin([this](
                                        unsigned methodIndex,
                                        bool /*frozen*/,
@@ -1752,12 +1760,13 @@ void Runtime::initNativeBuiltins() {
     assert(
         vmisa<NativeFunction>(cr->get()) &&
         "getNamed() of builtin method must be a NativeFunction");
-    builtins_[methodIndex] = vmcast<NativeFunction>(cr->get());
+    registerBuiltin(
+        (BuiltinMethod::Enum)methodIndex, vmcast<NativeFunction>(cr->get()));
     return ExecutionStatus::RETURNED;
   });
 
   // Now add the private native builtins.
-  createHermesBuiltins(*this, builtins_);
+  createHermesBuiltins(*this);
 #ifndef NDEBUG
   // Make sure native builtins are all defined.
   for (unsigned i = 0; i < BuiltinMethod::_firstJS; ++i) {
@@ -1781,9 +1790,7 @@ static const struct JSBuiltin {
 #include "hermes/FrontEndDefs/Builtins.def"
 };
 
-void Runtime::initJSBuiltins(
-    llvh::MutableArrayRef<Callable *> builtins,
-    Handle<JSObject> jsBuiltinsObj) {
+void Runtime::initJSBuiltins(Handle<JSObject> jsBuiltinsObj) {
   for (const JSBuiltin &jsBuiltin : jsBuiltins) {
     auto symID = jsBuiltin.symID;
     auto builtinIndex = jsBuiltin.builtinIndex;
@@ -1794,7 +1801,7 @@ void Runtime::initJSBuiltins(
     assert(getRes == ExecutionStatus::RETURNED && "Failed to get JS builtin.");
     Callable *jsFunc = vmcast<Callable>(getRes->getHermesValue());
 
-    builtins[builtinIndex] = jsFunc;
+    registerBuiltin((BuiltinMethod::Enum)builtinIndex, jsFunc);
   }
 }
 
@@ -2000,7 +2007,7 @@ void Runtime::dumpCallFrames(llvh::raw_ostream &OS) {
     if (auto *closure = dyn_vmcast<Callable>(sf.getCalleeClosureOrCBRef())) {
       OS << cellKindStr(closure->getKind()) << " ";
     }
-    if (auto *cb = sf.getCalleeCodeBlock(*this)) {
+    if (auto *cb = sf.getCalleeCodeBlock()) {
       OS << formatSymbolID(cb->getNameMayAllocate()) << " ";
     }
     dumpStackFrame(sf, OS, next);
@@ -2115,7 +2122,7 @@ std::string Runtime::getCallStackNoAlloc(const Inst *ip) {
   std::string res;
   // Note that the order of iteration is youngest (leaf) frame to oldest.
   for (auto frame : getStackFrames()) {
-    auto codeBlock = frame->getCalleeCodeBlock(*this);
+    auto codeBlock = frame->getCalleeCodeBlock();
     if (codeBlock) {
       res += codeBlock->getNameString();
       // Default to the function entrypoint, this
@@ -2181,7 +2188,7 @@ Runtime::getCurrentInterpreterLocation(const inst::Inst *ip) {
   const CodeBlock *codeBlock = nullptr;
   for (auto frameIt = callFrames.begin(); frameIt != callFrames.end();
        ++frameIt) {
-    codeBlock = frameIt->getCalleeCodeBlock(*this);
+    codeBlock = frameIt->getCalleeCodeBlock();
     if (codeBlock) {
       break;
     } else {

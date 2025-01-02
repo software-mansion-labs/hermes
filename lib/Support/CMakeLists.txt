@@ -12,6 +12,10 @@ if (ANDROID)
   set(LINK_LIBS log)
 endif()
 
+if (HERMES_USE_BOOST_CONTEXT)
+  include_directories(${PROJECT_SOURCE_DIR}/external/boost/boost_1_86_0)
+endif()
+
 add_hermes_library(hermesSupport
         Allocator.cpp
         Base64.cpp
@@ -22,6 +26,7 @@ add_hermes_library(hermesSupport
         ErrorHandling.cpp
         JSONEmitter.cpp
         MD5.cpp
+        OSCompatCommon.cpp
         OSCompatEmscripten.cpp
         OSCompatPosix.cpp
         OSCompatWindows.cpp
@@ -29,6 +34,8 @@ add_hermes_library(hermesSupport
         PerfSection.cpp
         SemaphorePosix.cpp
         SerialExecutor.cpp
+        StackExecutor.cpp
+        StackOverflowGuard.cpp
         SHA1.cpp
         SNPrintfBuf.cpp
         SourceErrorManager.cpp
@@ -39,6 +46,6 @@ add_hermes_library(hermesSupport
         LEB128.cpp
         MemorySizeParser.cpp
         RandomSeedParser.cpp
-        LINK_OBJLIBS ${LINK_OBJLIBS}
+        LINK_OBJLIBS ${LINK_OBJLIBS} ${BOOST_CONTEXT_LIB}
         LINK_LIBS ${LINK_LIBS}
 )

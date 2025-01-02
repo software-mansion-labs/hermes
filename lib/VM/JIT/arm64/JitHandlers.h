@@ -70,6 +70,9 @@ SHLegacyValue _interpreter_create_regexp(
     uint32_t flags,
     uint32_t regexpID);
 
+/// Wrapper around Interpreter::caseCreateClass
+void _interpreter_create_class(SHRuntime *shr, SHLegacyValue *frameRegs);
+
 /// Implementation of createFunctionEnvironment that takes the closure to get
 /// the parentEnvironment from.
 /// The native backend doesn't use createFunctionEnvironment.
@@ -114,8 +117,7 @@ void *_jit_find_catch_target(
 [[noreturn]] void _sh_throw_register_stack_overflow(SHRuntime *shr);
 
 /// Call the closure stored in the outgoing registers of the current frame. The
-/// caller is responsible for setting up the callee closure, arg count, and
-/// new.target registers.
-SHLegacyValue _jit_dispatch_call(SHRuntime *, SHLegacyValue *frame);
+/// caller is responsible for setting up the outgoing registers.
+SHLegacyValue _jit_dispatch_call(SHRuntime *, SHLegacyValue *callTargetSHLV);
 
 } // namespace hermes::vm

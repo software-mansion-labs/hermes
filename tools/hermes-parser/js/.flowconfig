@@ -26,10 +26,10 @@ module.name_mapper='^prettier-plugin-hermes-parser$' -> '<PROJECT_ROOT>/prettier
 component_syntax=true
 enums=true
 
-as_const=true
+experimental.natural_inference.exports.primitive_const=true
 
 [version]
-^0.251.1
+^0.256.0
 
 [lints]
 untyped-type-import=error

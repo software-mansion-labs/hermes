@@ -62,9 +62,11 @@ struct GotoLabel {
 /// functions, such as arrow functions.
 struct CapturedState {
   /// Parents of arrow functions need to capture their "this" parameter so the
-  /// arrow function can use it. Normal functions and constructors store their
-  /// "this" in a variable and record it here, if they contain at least one
-  /// arrow function. Arrow functions always copy their parent's value.
+  /// arrow function can use it. Normal functions and base class constructors
+  /// store their "this" in a variable and record it here, if they contain at
+  /// least one arrow function. Derived class constructors maintain a 'checked
+  /// this' which is only initialized after a completed call to super(). Arrow
+  /// functions always copy their parent's value.
   Variable *thisVal;
   /// Captured value of new target. In ES5 functions and ES6 constructors it is
   /// a Variable with the result of GetNewTargetInst executed at the start of
@@ -88,6 +90,23 @@ struct TypedClassContext {
 
   /// The type of the innermost typed class we are compiliing.
   flow::ClassType *type = nullptr;
+};
+
+/// Holds class state.
+struct LegacyClassContext {
+  /// Variable containing the class constructor of the enclosing class of the
+  /// method/constructor being generated, nullptr if none available.
+  Variable *constructor;
+
+  /// Variable containing the instance elements initializer closure.
+  Variable *instElemInitFuncVar;
+
+  /// Map from a ClassPropertyNode with a computed key to that key's value.
+  llvh::DenseMap<ESTree::ClassPropertyNode *, Variable *>
+      classComputedFieldKeys{};
+
+  explicit LegacyClassContext(Variable *cons, Variable *funcVar)
+      : constructor(cons), instElemInitFuncVar(funcVar) {}
 };
 
 /// Holds per-function state, specifically label tables. Should be constructed
@@ -197,6 +216,17 @@ class FunctionContext {
   /// Information about the current enclosing typed class.
   TypedClassContext typedClassContext{};
 
+  /// Information about the current enclosing legacy class. We make this a
+  /// shared_ptr so that we don't copy it by value when we need to enqueue
+  /// contained methods for compilation. It is initialized to nullptr here, and
+  /// is only set to some heap allocated value at the beginning of generating IR
+  /// for a class node. As we generate the IR for the methods of the class, the
+  /// shared_ptr is handed out to all of them when enqueuing them for
+  /// compilation. Thus, the memory can only be freed once we exit the IR
+  /// generation for the top-level class node, and once we finish generating IR
+  /// for all of the functions contained within the class node.
+  std::shared_ptr<LegacyClassContext> legacyClassContext{nullptr};
+
   /// Initialize a new function context, while preserving the previous one.
   /// \param irGen the associated ESTreeIRGen object.
   /// \param function the newly created Function IR node.
@@ -213,6 +243,20 @@ class FunctionContext {
   sema::FunctionInfo *getSemInfo() {
     assert(semInfo_ && "semInfo is not set");
     return semInfo_;
+  }
+
+  /// \return true if there is an active typed class context held in this
+  /// function context.
+  bool hasTypedClassContext() const {
+    // The class node is always set when a typed class is encountered, so we
+    // can reliably only test this field.
+    return typedClassContext.node;
+  }
+
+  /// \return true if there is an active legacy class context held in this
+  /// function context.
+  bool hasLegacyClassContext() const {
+    return legacyClassContext != nullptr;
   }
 
   /// Generate a unique string that represents a temporary value. The string
@@ -437,6 +481,7 @@ class ESTreeIRGen {
     // These apply for class-like nodes.
     ImplicitClassConstructor = 0,
     ImplicitFieldInitializer = 1,
+    ImplicitStaticElementsInitializer = 2,
   };
 
   /// Map from an AST node to a "compiled entity", which is usually a Function.
@@ -506,6 +551,11 @@ class ESTreeIRGen {
   Identifier genAnonymousLabelName(Identifier hint) {
     return genAnonymousLabelName(hint.isValid() ? hint.str() : "anonymous");
   }
+
+  /// Convert a property key node to its JavaScript string representation.
+  static llvh::StringRef propertyKeyAsString(
+      llvh::SmallVectorImpl<char> &storage,
+      ESTree::Node *Key);
 
  public:
   explicit ESTreeIRGen(
@@ -578,17 +628,9 @@ class ESTreeIRGen {
   bool treeDoesNotCapture(ESTree::Node *tree);
   /// Compile a for-loop.
   void genForLoop(ESTree::ForStatementNode *loop);
-  /// Compile a for-loop with let/const declaration.
-  ///
-  /// \param loop the loop
-  /// \param testExprCaptures the test expression possibly captures variables.
-  ///     True also implies tha the test expression is non-null.
-  /// \param updateExprCaptures the update expression possibly captures
-  ///     variables. True also implies tha the test expression is non-null.
-  void genScopedForLoop(
-      ESTree::ForStatementNode *loop,
-      bool testExprCaptures,
-      bool updateExprCaptures);
+  /// General case for compiling a for loop which may have captures in the
+  /// init/test/update expressions.
+  void genScopedForLoop(ESTree::ForStatementNode *loop);
 
   void genSwitchStatement(ESTree::SwitchStatementNode *switchStmt);
 
@@ -624,6 +666,60 @@ class ESTreeIRGen {
   CreateFunctionInst *genTypedImplicitConstructor(
       const Identifier &consName,
       Value *superClass);
+
+  /// Generate IR for a legacy class declaration. This just forwards into
+  /// genLegacyClassLike.
+  void genLegacyClassDeclaration(ESTree::ClassDeclarationNode *node);
+
+  /// Generate IR for a legacy class expression. This just forwards into
+  /// genLegacyClassLike.
+  Value *genLegacyClassExpression(
+      ESTree::ClassExpressionNode *node,
+      Identifier nameHint);
+
+  /// Generate IR for legacy classes or declarations. This iterates through the
+  /// entire class body and processes each class element.
+  CreateClassInst *genLegacyClassLike(
+      ESTree::ClassLikeNode *classNode,
+      Identifier nameHint);
+
+  /// Generate IR for a direct call to super.
+  Value *genLegacyDirectSuper(ESTree::CallExpressionNode *call);
+
+  /// Generate IR for `this` in a derived legacy class constructor.
+  Value *genLegacyDerivedThis();
+
+  /// Generate IR for a `return` statement in a derived legacy class
+  /// constructor. This makes sure that \p returnValue is undefined or an
+  /// object, and performs the checks on `this` when required.
+  /// This corresponds mostly closely with ES15 10.2.2 [[Construct]].
+  Value *genLegacyDerivedConstructorRet(
+      ESTree::ReturnStatementNode *node,
+      Value *returnValue);
+
+  /// Generate function code for a function that initializes all instance
+  /// elements in a legacy class.
+  NormalFunction *genLegacyInstanceElementsInit(
+      ESTree::ClassLikeNode *legacyClassNode,
+      Variable *homeObjectVar,
+      const Identifier &consName);
+
+  /// Emit IR to invoke the instance elements initializer function for a legacy
+  /// class.
+  void emitLegacyInstanceElementsInitCall();
+
+  /// Generate function code for a function that initializes all static elements
+  /// in a legacy class.
+  NormalFunction *genStaticElementsInitFunction(
+      ESTree::ClassLikeNode *legacyClassNode,
+      const Identifier &consName);
+
+  /// Generate the function code for the implicit constructor of a legacy class.
+  /// \param superClassNode is non-null for constructors of a derived class.
+  NormalFunction *genLegacyImplicitConstructor(
+      ESTree::ClassLikeNode *classNode,
+      const Identifier &className,
+      ESTree::Node *superClassNode);
 
   /// Emit code to allocate an empty instance of the specified class and return
   /// it.
@@ -724,6 +820,15 @@ class ESTreeIRGen {
   /// $SHBuiltin.externC({}, function fopen(path: c_ptr, mode: c_ptr): c_ptr)
   /// Import an external C function.
   Value *genSHBuiltinExternC(ESTree::CallExpressionNode *call);
+
+  /// $SHBuiltin.moduleFactory(modId, factoryFunction)
+  /// Process \p factoryFunction as a module initialization function,
+  /// for the module with id \p modId.
+  Value *genSHBuiltinModuleFactory(ESTree::CallExpressionNode *call);
+
+  /// $SHBuiltin.export(modId, importNameStr, importExp)
+  /// For now, this just evaluates to the third argument of \p call.
+  Value *genSHBuiltinImport(ESTree::CallExpressionNode *call);
 
   /// Emits the actual call for \p call, and is used as a helper function for
   /// genCallExpr and genOptionalCallExpr.
@@ -953,20 +1058,26 @@ class ESTreeIRGen {
   ///   ES5Function by default, but may also be ES6Constructor.
   /// \param homeObject will be set as the homeObject in the CapturedState of
   /// the function \p FE we are going to generate.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   Value *genFunctionExpression(
       ESTree::FunctionExpressionNode *FE,
       Identifier nameHint,
       ESTree::Node *superClassNode = nullptr,
       Function::DefinitionKind functionKind =
           Function::DefinitionKind::ES5Function,
-      Variable *homeObject = nullptr);
+      Variable *homeObject = nullptr,
+      ESTree::Node *parentNode = nullptr);
 
   /// Generate IR for ArrowFunctionExpression.
   /// \param parentScope is the VariableScope of the enclosing function, or null
   ///   if there isn't one.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   Value *genArrowFunctionExpression(
       ESTree::ArrowFunctionExpressionNode *AF,
-      Identifier nameHint);
+      Identifier nameHint,
+      ESTree::Node *parentNode = nullptr);
 
   /// Generate IR for a function which inherits the current captured state
   /// (this, arguments etc.), which may be lazy.
@@ -975,13 +1086,16 @@ class ESTreeIRGen {
   /// \param functionNode is the ESTree arrow function node.
   /// \param parentScope is the VariableScope of the enclosing function, or null
   ///   if there isn't one.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   /// \param capturedState the relevant captured state.
   NormalFunction *genCapturingFunction(
       Identifier originalName,
       ESTree::FunctionLikeNode *functionNode,
       VariableScope *parentScope,
       const CapturedState &capturedState,
-      Function::DefinitionKind functionKind);
+      Function::DefinitionKind functionKind,
+      ESTree::Node *parentNode = nullptr);
 
   /// Generate IR for a function (function declaration or expression) that is
   /// not a generator, async, or arrow function.  Constructors are "basic",
@@ -1000,6 +1114,8 @@ class ESTreeIRGen {
   ///  is for a constructor.
   /// \param homeObject will be set as the homeObject in the CapturedState of
   /// the function \p FE we are going to generate.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   /// \returns a new Function.
   NormalFunction *genBasicFunction(
       Identifier originalName,
@@ -1008,7 +1124,8 @@ class ESTreeIRGen {
       ESTree::Node *superClassNode = nullptr,
       Function::DefinitionKind functionKind =
           Function::DefinitionKind::ES5Function,
-      Variable *homeObject = nullptr);
+      Variable *homeObject = nullptr,
+      ESTree::Node *parentNode = nullptr);
 
   /// Generate the IR for two functions: an outer GeneratorFunction and an inner
   /// GeneratorInnerFunction. The outer function runs CreateGenerator on the
@@ -1019,12 +1136,15 @@ class ESTreeIRGen {
   ///   object method).
   /// \param homeObject will be set as the homeObject in the CapturedState of
   /// the function \p FE we are going to generate.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   /// \return the outer Function.
   Function *genGeneratorFunction(
       Identifier originalName,
       ESTree::FunctionLikeNode *functionNode,
       VariableScope *parentScope,
-      Variable *homeObject = nullptr);
+      Variable *homeObject = nullptr,
+      ESTree::Node *parentNode = nullptr);
 
   /// Generate the IR for an async function: it desugars async function to a
   /// generator function wrapped in a call to the JS builtin `spawnAsync` and
@@ -1037,12 +1157,15 @@ class ESTreeIRGen {
   /// \param functionNode is the ESTree function node (declaration, expression,
   ///   object method).
   /// \param capturedState the relevant captured state.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   /// \return the async Function.
   Function *genAsyncFunction(
       Identifier originalName,
       ESTree::FunctionLikeNode *functionNode,
       VariableScope *parentScope,
-      const CapturedState &capturedState);
+      const CapturedState &capturedState,
+      ESTree::Node *parentNode = nullptr);
 
   /// In the beginning of an ES5 function, initialize the special captured
   /// variables needed by arrow functions, constructors and methods.
@@ -1144,9 +1267,12 @@ class ESTreeIRGen {
   static void genDummyFunction(Function *dummy);
 
   /// Add a LazyCompilationDataInst stub to \p F.
+  /// \param parentNode can optionally be set to the parent AST node of the
+  ///  function node.
   void setupLazyFunction(
       Function *F,
       ESTree::FunctionLikeNode *functionNode,
+      ESTree::Node *parentNode,
       ESTree::BlockStatementNode *bodyBlock,
       VariableScope *parentVarScope,
       ExtraKey extraKey,

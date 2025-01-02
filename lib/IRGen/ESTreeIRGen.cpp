@@ -9,6 +9,7 @@
 
 #include "hermes/IR/IRUtils.h"
 
+#include "llvh/ADT/ScopeExit.h"
 #include "llvh/ADT/SetVector.h"
 #include "llvh/ADT/StringSet.h"
 #include "llvh/Support/Debug.h"
@@ -118,6 +119,38 @@ ESTreeIRGen::ESTreeIRGen(
       Builder(Mod),
       identDefaultExport_(Builder.createIdentifier("?default")) {}
 
+llvh::StringRef ESTreeIRGen::propertyKeyAsString(
+    llvh::SmallVectorImpl<char> &storage,
+    ESTree::Node *Key) {
+  // Handle String Literals.
+  // http://www.ecma-international.org/ecma-262/6.0/#sec-literals-string-literals
+  if (auto *Lit = llvh::dyn_cast<ESTree::StringLiteralNode>(Key)) {
+    LLVM_DEBUG(
+        llvh::dbgs() << "Loading String Literal \"" << Lit->_value << "\"\n");
+    return Lit->_value->str();
+  }
+
+  // Handle identifiers as if they are String Literals.
+  if (auto *Iden = llvh::dyn_cast<ESTree::IdentifierNode>(Key)) {
+    LLVM_DEBUG(
+        llvh::dbgs() << "Loading String Literal \"" << Iden->_name << "\"\n");
+    return Iden->_name->str();
+  }
+
+  // Handle Number Literals.
+  // http://www.ecma-international.org/ecma-262/6.0/#sec-literals-numeric-literals
+  if (auto *Lit = llvh::dyn_cast<ESTree::NumericLiteralNode>(Key)) {
+    LLVM_DEBUG(
+        llvh::dbgs() << "Loading Numeric Literal \"" << Lit->_value << "\"\n");
+    storage.resize(NUMBER_TO_STRING_BUF_SIZE);
+    auto len = numberToString(Lit->_value, storage.data(), storage.size());
+    return llvh::StringRef(storage.begin(), len);
+  }
+
+  llvm_unreachable("Don't know this kind of property key");
+  return llvh::StringRef();
+}
+
 void ESTreeIRGen::doIt(llvh::StringRef topLevelFunctionName) {
   LLVM_DEBUG(llvh::dbgs() << "Processing top level program.\n");
 
@@ -216,6 +249,13 @@ Function *ESTreeIRGen::doItInScope(EvalCompilationDataInst *evalDataInst) {
   curFunction()->capturedState.thisVal = evalDataInst->getCapturedThis();
   curFunction()->capturedState.homeObject = evalDataInst->getHomeObject();
 
+  // If there was class context, restore it.
+  if (evalDataInst->getClsConstructor()) {
+    curFunction()->legacyClassContext = std::make_shared<LegacyClassContext>(
+        evalDataInst->getClsConstructor(),
+        evalDataInst->getClsInstElemInitFunc());
+  }
+
   emitFunctionPrologue(
       Program,
       Builder.createBasicBlock(newFunc),
@@ -290,6 +330,19 @@ Function *ESTreeIRGen::doLazyFunction(Function *lazyFunc) {
       lazyDataInst->getCapturedNewTarget(),
       lazyDataInst->getCapturedArguments(),
       homeObj};
+
+  // If there was class context, restore it.
+  if (lazyDataInst->getClsConstructor()) {
+    curFunction()->legacyClassContext = std::make_shared<LegacyClassContext>(
+        lazyDataInst->getClsConstructor(),
+        lazyDataInst->getClsInstaneElemInitFunc());
+  }
+
+  auto freeClsCtx = llvh::make_scope_exit([this]() {
+    if (curFunction()->legacyClassContext)
+      curFunction()->legacyClassContext.reset();
+  });
+
   Function *compiledFunc;
   if (auto *arrow = llvh::dyn_cast<ESTree::ArrowFunctionExpressionNode>(Root)) {
     if (arrow->_async) {
@@ -338,6 +391,9 @@ Function *ESTreeIRGen::doLazyFunction(Function *lazyFunc) {
   // because we store the error message in BytecodeFunction and reuse it,
   // ensuring we never use the information in lazyFunc ever again.
 
+  // Free the allocated legacy class context.
+  if (curFunction()->legacyClassContext)
+    curFunction()->legacyClassContext.reset();
   return compiledFunc;
 }
 
@@ -1010,7 +1066,7 @@ void ESTreeIRGen::emitRestProperty(
         Builder.createAllocObjectLiteralInst({}, Builder.getLiteralNull());
 
     for (Literal *key : literalExcludedItems)
-      Builder.createStoreNewOwnPropertyInst(
+      Builder.createDefineNewOwnPropertyInst(
           zeroValue, excludedObj, key, IRBuilder::PropEnumerable::Yes);
 
     for (Value *key : computedExcludedItems) {
