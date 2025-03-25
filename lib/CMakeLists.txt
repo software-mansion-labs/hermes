@@ -17,6 +17,7 @@ add_hermes_library(hermesOptimizer
   Optimizer/Scalar/FrameLoadStoreOpts.cpp
   Optimizer/Scalar/LowerBuiltinCalls.cpp
   Optimizer/Scalar/ScopeElimination.cpp
+  Optimizer/Scalar/ScopeHoisting.cpp
   Optimizer/Scalar/TypeInference.cpp
   Optimizer/Scalar/SimpleStackPromotion.cpp
   Optimizer/Scalar/ObjectMergeNewStores.cpp
@@ -28,13 +29,11 @@ add_hermes_library(hermesOptimizer
   Optimizer/Scalar/Utils.cpp
   Optimizer/Scalar/FunctionAnalysis.cpp
   Optimizer/Scalar/Inlining.cpp
-  Optimizer/Scalar/HoistStartGenerator.cpp
   Optimizer/Scalar/InstructionEscapeAnalysis.cpp
   Optimizer/Scalar/TDZDedup.cpp
   Optimizer/Scalar/StripDebugInsts.cpp
   Optimizer/Scalar/CacheNewObject.cpp
-  IR/Analysis.cpp
-  IR/IREval.cpp
+  LINK_OBJLIBS hermesFrontend
 )
 
 add_hermes_library(hermesFrontend
@@ -46,7 +45,9 @@ add_hermes_library(hermesFrontend
   IRGen/ESTreeIRGen-except.cpp
   IRGen/ESTreeIRGen-typed-class.cpp
   IRGen/ESTreeIRGen-legacy-class.cpp
+  IR/Analysis.cpp
   IR/IR.cpp
+  IR/IREval.cpp
   IR/CFG.cpp
   IR/IRBuilder.cpp
   IR/IRVerifier.cpp
@@ -153,7 +154,7 @@ target_link_libraries(hermesvmlean_a PUBLIC
   LLVHSupport_obj
   ${BOOST_CONTEXT_LIB}
   dtoa_obj
-  hermesapiLean_obj
+  hermesapi_obj
   hermesADT_obj
   hermesFrontEndDefs_obj # needed by JIT
   hermesHBCBackendLean_obj
@@ -166,7 +167,7 @@ target_link_libraries(hermesvmlean_a PUBLIC
   hermesPublic_obj
   hermesRegex_obj
   hermesSupport_obj
-  hermesVMRuntimeLean_obj
+  hermesVMRuntime_obj
   zip_obj
   )
 
@@ -238,7 +239,7 @@ endif()
 # Since we use private dependencies above, we need to enumerate all the headers
 # that should be available to consumers of hermesvm. Note that we only expose
 # the headers which produce visible symbols.
-target_include_directories(hermesvm PUBLIC ${CMAKE_SOURCE_DIR}/public ${CMAKE_SOURCE_DIR}/API ${HERMES_JSI_DIR})
+target_include_directories(hermesvm PUBLIC ${CMAKE_SOURCE_DIR}/public ${HERMES_COMMON_DIR}/public ${CMAKE_SOURCE_DIR}/API ${HERMES_JSI_DIR})
 
 # Private dependencies also mean that JSI will not get propagated to libraries
 # that depend on hermesvm. If JSI is built as a shared library, ensure it is

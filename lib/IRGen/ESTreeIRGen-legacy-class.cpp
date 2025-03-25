@@ -156,6 +156,12 @@ CreateClassInst *ESTreeIRGen::genLegacyClassLike(
       if (method->_kind == kw_.identConstructor) {
         continue;
       }
+      if (llvh::isa<ESTree::PrivateNameNode>(method->_key)) {
+        Builder.getModule()->getContext().getSourceErrorManager().error(
+            method->_key->getSourceRange(),
+            Twine("private properties are not supported"));
+        return nullptr;
+      }
       Value *key;
       Identifier nameHint{};
       if (method->_computed) {
@@ -195,6 +201,13 @@ CreateClassInst *ESTreeIRGen::genLegacyClassLike(
             Builder.createToPropertyKeyInst(genExpression(prop->_key)),
             fieldKeyVar);
       }
+    }
+    if (auto *privateProp =
+            llvh::dyn_cast<ESTree::ClassPrivatePropertyNode>(&classElement)) {
+      Builder.getModule()->getContext().getSourceErrorManager().error(
+          privateProp->getSourceRange(),
+          Twine("private properties are not supported"));
+      return nullptr;
     }
   }
 
@@ -260,33 +273,49 @@ Value *ESTreeIRGen::genLegacyDirectSuper(ESTree::CallExpressionNode *call) {
   // We want to invoke the parent of the class we are generating.
   auto *callee = Builder.createLoadParentNoTrapsInst(
       Builder.createLoadFrameInst(constructorScope, LC->constructor));
-  // Derived classes don't take in a `this`, so construct it here.
-  auto *thisParam = Builder.createCreateThisInst(callee, newTarget);
-  auto *superRes = emitCall(
-      call, callee, Builder.getEmptySentinel(), false, thisParam, newTarget);
+
+  // We don't call into emitCall here because we need to generate the IR for the
+  // arguments before generating the IR for the `this` value.
+  bool hasSpread = llvh::any_of(getArguments(call), [](auto &arg) {
+    return llvh::isa<ESTree::SpreadElementNode>(&arg);
+  });
+  Value *superRes;
+  if (hasSpread) {
+    auto *args = genArrayFromElements(getArguments(call));
+    superRes = genBuiltinCall(
+        BuiltinMethod::HermesBuiltin_applyWithNewTarget,
+        {callee,
+         args,
+         Builder.createCreateThisInst(callee, newTarget),
+         newTarget});
+  } else {
+    CallInst::ArgumentList args;
+    for (auto &arg : getArguments(call)) {
+      args.push_back(genExpression(&arg));
+    }
+    auto *thisVal = Builder.createCreateThisInst(callee, newTarget);
+    auto *callInst = Builder.createCallInst(
+        callee,
+        Builder.getEmptySentinel(),
+        false,
+        /* env */ Builder.getEmptySentinel(),
+        newTarget,
+        thisVal,
+        args);
+    superRes = Builder.createGetConstructedObjectInst(thisVal, callInst);
+  }
+  // A super call always returns object.
+  superRes->setType(Type::createObject());
+
   auto *checkedThis = curFunction()->capturedState.thisVal;
   auto *checkedThisScope =
       emitResolveScopeInstIfNeeded(checkedThis->getParent());
   Builder.createThrowIfThisInitializedInst(
       Builder.createLoadFrameInst(checkedThisScope, checkedThis));
-  Value *initializedThisVal = nullptr;
-  if (auto *CI = llvh::dyn_cast<CallInst>(superRes)) {
-    // Correctly pick between the provided `this` and the return value of the
-    // super call.
-    initializedThisVal = Builder.createGetConstructedObjectInst(thisParam, CI);
-  } else {
-    // If it's not a simple call instruction, then the logic of
-    // GetConstructedObject is already being replicated in the way the call was
-    // emitted.
-    initializedThisVal = superRes;
-  }
-  // A construct call always returns object.
-  initializedThisVal->setType(Type::createObject());
-  Builder.createStoreFrameInst(
-      checkedThisScope, initializedThisVal, checkedThis);
+  Builder.createStoreFrameInst(checkedThisScope, superRes, checkedThis);
   // After a successful call to super, run the field initializer function.
   emitLegacyInstanceElementsInitCall();
-  return initializedThisVal;
+  return superRes;
 }
 
 Value *ESTreeIRGen::genLegacyDerivedConstructorRet(
@@ -509,16 +538,20 @@ NormalFunction *ESTreeIRGen::genStaticElementsInitFunction(
         if (!prop->_static)
           continue;
         Value *propKey;
+        Identifier nameHint;
         if (prop->_computed) {
           // use .at, since there should always be an entry for this node.
           Variable *fieldKeyVar = LC->classComputedFieldKeys.at(prop);
           auto *scope = emitResolveScopeInstIfNeeded(fieldKeyVar->getParent());
           propKey = Builder.createLoadFrameInst(scope, fieldKeyVar);
         } else {
+          if (auto *id = llvh::dyn_cast<ESTree::IdentifierNode>(prop->_key)) {
+            nameHint = Identifier::getFromPointer(id->_name);
+          }
           propKey =
               Builder.getLiteralString(propertyKeyAsString(buffer, prop->_key));
         }
-        Value *propValue = prop->_value ? genExpression(prop->_value)
+        Value *propValue = prop->_value ? genExpression(prop->_value, nameHint)
                                         : Builder.getLiteralUndefined();
         Builder.createDefineOwnPropertyInst(
             propValue, classVal, propKey, IRBuilder::PropEnumerable::Yes);
@@ -587,15 +620,19 @@ NormalFunction *ESTreeIRGen::genLegacyInstanceElementsInit(
         if (prop->_static)
           continue;
         Value *propKey;
+        Identifier nameHint;
         if (prop->_computed) {
           Variable *fieldKeyVar = LC->classComputedFieldKeys.at(prop);
           auto *scope = emitResolveScopeInstIfNeeded(fieldKeyVar->getParent());
           propKey = Builder.createLoadFrameInst(scope, fieldKeyVar);
         } else {
+          if (auto *ID = llvh::dyn_cast<ESTree::IdentifierNode>(prop->_key)) {
+            nameHint = Identifier::getFromPointer(ID->_name);
+          }
           propKey =
               Builder.getLiteralString(propertyKeyAsString(buffer, prop->_key));
         }
-        Value *propValue = prop->_value ? genExpression(prop->_value)
+        Value *propValue = prop->_value ? genExpression(prop->_value, nameHint)
                                         : Builder.getLiteralUndefined();
         Builder.createDefineOwnPropertyInst(
             propValue, thisParam, propKey, IRBuilder::PropEnumerable::Yes);

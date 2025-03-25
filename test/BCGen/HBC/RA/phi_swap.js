@@ -19,17 +19,14 @@ function foo (a, b) {
 
 // Auto-generated content below. Please do not modify manually.
 
-// CHECK:scope %VS0 []
-
 // CHECK:function global(): undefined
 // CHECK-NEXT:%BB0:
 // CHECK-NEXT:                 DeclareGlobalVarInst "foo": string
-// CHECK-NEXT:  {r0}      %1 = CreateScopeInst (:environment) %VS0: any, empty: any
-// CHECK-NEXT:  {r1}      %2 = CreateFunctionInst (:object) {r0} %1: environment, %foo(): functionCode
-// CHECK-NEXT:  {r0}      %3 = HBCGetGlobalObjectInst (:object)
-// CHECK-NEXT:                 StorePropertyLooseInst {r1} %2: object, {r0} %3: object, "foo": string
-// CHECK-NEXT:  {np0}     %5 = HBCLoadConstInst (:undefined) undefined: undefined
-// CHECK-NEXT:                 ReturnInst {np0} %5: undefined
+// CHECK-NEXT:  {r1}      %1 = HBCGetGlobalObjectInst (:object)
+// CHECK-NEXT:  {np0}     %2 = HBCLoadConstInst (:undefined) undefined: undefined
+// CHECK-NEXT:  {r0}      %3 = CreateFunctionInst (:object) {np0} %2: undefined, empty: any, %foo(): functionCode
+// CHECK-NEXT:                 StorePropertyLooseInst {r0} %3: object, {r1} %1: object, "foo": string
+// CHECK-NEXT:                 ReturnInst {np0} %2: undefined
 // CHECK-NEXT:function_end
 
 // CHECK:function foo(a: any, b: any): any [noReturn]

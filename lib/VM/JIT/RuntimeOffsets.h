@@ -20,7 +20,10 @@ namespace vm {
 
 struct RuntimeOffsets {
   static constexpr uint32_t stackPointer = offsetof(Runtime, stackPointer_);
+  static constexpr uint32_t registerStackEnd =
+      offsetof(Runtime, registerStackEnd_);
   static constexpr uint32_t currentFrame = offsetof(Runtime, currentFrame_);
+  static constexpr uint32_t currentIP = offsetof(Runtime, currentIP_);
   static constexpr uint32_t globalObject = offsetof(Runtime, global_);
   static constexpr uint32_t thrownValue = offsetof(Runtime, thrownValue_);
   static constexpr uint32_t shLocals = offsetof(Runtime, shLocals);
@@ -41,6 +44,8 @@ struct RuntimeOffsets {
 
   /// Can't use offsetof here because KindAndSize uses bitfields.
   static constexpr uint32_t kindAndSizeKind = KindAndSize::kNumSizeBits / 8;
+
+  static constexpr uint32_t boxedDoubleValue = offsetof(BoxedDouble, value_);
 };
 
 #pragma GCC diagnostic pop

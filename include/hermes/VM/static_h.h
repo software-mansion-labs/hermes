@@ -82,8 +82,9 @@ typedef struct SHUnit {
 
   /// Number of symbols (strings).
   uint32_t num_symbols;
-  /// Size of the property cache.
-  uint32_t num_prop_cache_entries;
+  /// Sizes of the property caches.
+  uint32_t num_read_prop_cache_entries;
+  uint32_t num_write_prop_cache_entries;
 
   /// Pool of ASCII strings.
   const char *ascii_pool;
@@ -103,9 +104,14 @@ typedef struct SHUnit {
   /// Symbols populated by the init code from strings above. This pointer is
   /// initialized by the owner of the struct and typically points into BSS.
   SHSymbolID *symbols;
-  /// Property cache. Points to an array with `num_prop_cache_entries` elements.
-  /// Must be zeroed initially.
-  SHPropertyCacheEntry *prop_cache;
+  /// Write Property cache. Points to an array with
+  /// `num_write_prop_cache_entries` elements.  Must be zeroed
+  /// initially.
+  SHWritePropertyCacheEntry *write_prop_cache;
+  /// Read Property cache. Points to an array with
+  /// `num_read_prop_cache_entries` elements.  Must be zeroed
+  /// initially.
+  SHReadPropertyCacheEntry *read_prop_cache;
 
   /// Object key buffer.
   const unsigned char *obj_key_buffer;
@@ -328,7 +334,7 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_create_this(
     SHRuntime *shr,
     SHLegacyValue *callee,
     SHLegacyValue *newTarget,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHReadPropertyCacheEntry *propCacheEntry);
 
 #ifndef _WINDOWS
 // Use _setjmp and _longjmp outside Windows, to avoid saving and restoring the
@@ -502,7 +508,7 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_create_closure(
     const SHUnit *unit);
 
 /// Create a generator object.
-/// \param env Should not be null.
+/// \param env NULL if there is no environment.
 /// \param funcInfo Should not be null.
 SHERMES_EXPORT SHLegacyValue _sh_ljs_create_generator_object(
     SHRuntime *shr,
@@ -531,25 +537,25 @@ SHERMES_EXPORT void _sh_ljs_put_by_id_loose_rjs(
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_put_by_id_strict_rjs(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_try_put_by_id_loose_rjs(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_try_put_by_id_strict_rjs(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHSymbolID symID,
     SHLegacyValue *value,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHWritePropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT void _sh_ljs_put_by_val_loose_rjs(
     SHRuntime *shr,
     SHLegacyValue *target,
@@ -560,60 +566,74 @@ SHERMES_EXPORT void _sh_ljs_put_by_val_strict_rjs(
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *value);
+SHERMES_EXPORT void _sh_ljs_put_by_val_with_receiver_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHLegacyValue *key,
+    SHLegacyValue *value,
+    SHLegacyValue *receiver,
+    bool isStrict);
 
 SHERMES_EXPORT SHLegacyValue _sh_ljs_try_get_by_id_rjs(
     SHRuntime *shr,
     const SHLegacyValue *source,
     SHSymbolID symID,
-    SHPropertyCacheEntry *propCacheEntry);
+    SHReadPropertyCacheEntry *propCacheEntry);
 SHERMES_EXPORT SHLegacyValue _sh_ljs_get_by_id_rjs(
     SHRuntime *shr,
     const SHLegacyValue *source,
     SHSymbolID symID,
-    SHPropertyCacheEntry *propCacheEntry);
-SHERMES_EXPORT SHLegacyValue _sh_ljs_get_by_val_rjs(
+    SHReadPropertyCacheEntry *propCacheEntry);
+SHERMES_EXPORT SHLegacyValue _sh_ljs_get_by_id_with_receiver_rjs(
+    SHRuntime *shr,
+    const SHLegacyValue *source,
+    const SHLegacyValue *receiver,
+    SHSymbolID symID,
+    SHReadPropertyCacheEntry *propCacheEntry);
+SHERMES_EXPORT SHLegacyValue _sh_ljs_get_by_val_with_receiver_rjs(
     SHRuntime *shr,
     SHLegacyValue *source,
-    SHLegacyValue *key);
+    SHLegacyValue *key,
+    SHLegacyValue *receiver);
+static inline SHLegacyValue _sh_ljs_get_by_val_rjs(
+    SHRuntime *shr,
+    SHLegacyValue *source,
+    SHLegacyValue *key) {
+  return _sh_ljs_get_by_val_with_receiver_rjs(shr, source, key, source);
+}
 
 /// Get a property from the given object \p source given a valid array index
 /// \p key.
 SHERMES_EXPORT SHLegacyValue
 _sh_ljs_get_by_index_rjs(SHRuntime *shr, SHLegacyValue *source, uint32_t key);
 
+/// Put an enumerable property by string id.
+SHERMES_EXPORT void _sh_ljs_define_own_by_id(
+    SHRuntime *shr,
+    SHLegacyValue *target,
+    SHSymbolID key,
+    SHLegacyValue *value,
+    SHWritePropertyCacheEntry *cacheEntry);
 /// Put an enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_own_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *value);
 /// Put a non-enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_own_ne_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_ne_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
     SHLegacyValue *value);
 
-SHERMES_EXPORT void _sh_ljs_put_own_by_index(
+SHERMES_EXPORT void _sh_ljs_define_own_by_index(
     SHRuntime *shr,
     SHLegacyValue *target,
     uint32_t key,
     SHLegacyValue *value);
 
-/// Put an enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_new_own_by_id(
-    SHRuntime *shr,
-    SHLegacyValue *target,
-    SHSymbolID key,
-    SHLegacyValue *value);
-/// Put a non-enumerable property.
-SHERMES_EXPORT void _sh_ljs_put_new_own_ne_by_id(
-    SHRuntime *shr,
-    SHLegacyValue *target,
-    SHSymbolID key,
-    SHLegacyValue *value);
-
-SHERMES_EXPORT void _sh_ljs_put_own_getter_setter_by_val(
+SHERMES_EXPORT void _sh_ljs_define_own_getter_setter_by_val(
     SHRuntime *shr,
     SHLegacyValue *target,
     SHLegacyValue *key,
@@ -775,13 +795,14 @@ SHERMES_EXPORT SHLegacyValue _sh_ljs_new_array_with_buffer(
 /// \p newTarget is the new.target value in the function.
 /// \p shapeTableIndex is the index into the shape table where the serialized
 ///   keys for this operation are stored.
-/// \return \p thisArg.
-SHERMES_EXPORT SHLegacyValue _sh_ljs_cache_new_object(
+/// \p cacheEntry is the cache entry for this operation.
+SHERMES_EXPORT void _sh_ljs_cache_new_object(
     SHRuntime *shr,
     SHUnit *unit,
     SHLegacyValue *thisArg,
     SHLegacyValue *newTarget,
-    uint32_t shapeTableIndex);
+    uint32_t shapeTableIndex,
+    void **cacheEntry);
 
 /// \return a newly created fast array with the given \p capacity.
 SHERMES_EXPORT SHLegacyValue

@@ -116,7 +116,7 @@ std::unique_ptr<Buffer> SimpleBytecodeBuilder::generateBytecodeBuffer() {
     // Write the offset to the FunctionHeaders using SmallFuncHeader here.
     for (uint32_t i = 0; i < functionCount; ++i) {
       SmallFuncHeader small(functions_[i].infoOffset);
-      assert(small.flags.overflowed);
+      assert(small.flags.getOverflowed());
       appendStructToBytecode(bytecode, small);
     }
   } else {
@@ -131,11 +131,12 @@ std::unique_ptr<Buffer> SimpleBytecodeBuilder::generateBytecodeBuffer() {
           /* nonPtrRegCount */ 0,
           0,
           functions_[i].highestReadCacheIndex,
-          functions_[i].highestWriteCacheIndex};
-      funcHeader.offset = functions_[i].offset;
-      funcHeader.flags.strictMode = true;
+          functions_[i].highestWriteCacheIndex,
+          /* numCacheNewObject */ 0};
+      funcHeader.setOffset(functions_[i].offset);
+      funcHeader.flags.setStrictMode(true);
       SmallFuncHeader small(funcHeader);
-      assert(!small.flags.overflowed);
+      assert(!small.flags.getOverflowed());
       appendStructToBytecode(bytecode, small);
     }
   }
@@ -166,10 +167,11 @@ std::unique_ptr<Buffer> SimpleBytecodeBuilder::generateBytecodeBuffer() {
           /* nonPtrRegCount */ 0,
           0,
           functions_[i].highestReadCacheIndex,
-          functions_[i].highestWriteCacheIndex};
-      funcHeader.offset = functions_[i].offset;
-      funcHeader.flags.strictMode = true;
-      funcHeader.flags.hasDebugInfo = true;
+          functions_[i].highestWriteCacheIndex,
+          /* numCacheNewObject */ 0};
+      funcHeader.setOffset(functions_[i].offset);
+      funcHeader.flags.setStrictMode(true);
+      funcHeader.flags.setHasDebugInfo(true);
       DebugOffsets offsets{0, 0};
       bytecode.resize(llvh::alignTo(bytecode.size(), 4));
       appendStructToBytecode(bytecode, funcHeader);

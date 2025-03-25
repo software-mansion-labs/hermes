@@ -75,6 +75,7 @@ void ESTreeIRGen::genFunctionDeclaration(
   }
 
   Value *funcStorage = resolveIdentifier(id);
+  Value *funcStoragePromoted = resolveIdentifierPromoted(id);
   assert(funcStorage && "Function declaration storage must have been resolved");
 
   auto *newFuncParentScope = curFunction()->curScope->getVariableScope();
@@ -92,6 +93,8 @@ void ESTreeIRGen::genFunctionDeclaration(
       Builder.createCreateFunctionInst(curFunction()->curScope, newFunc);
 
   emitStore(newClosure, funcStorage, true);
+  if (funcStoragePromoted)
+    emitStore(newClosure, funcStoragePromoted, true);
 }
 
 Value *ESTreeIRGen::genFunctionExpression(
@@ -342,13 +345,10 @@ NormalFunction *ESTreeIRGen::genBasicFunction(
     newFunctionContext.legacyClassContext = legacyClassContext;
 
     if (isGeneratorInnerFunction) {
-      // StartGeneratorInst
-      // ResumeGeneratorInst
-      // at the beginning of the function, to allow for the first .next()
-      // call.
+      // ResumeGeneratorInst at the beginning of the function, to allow for the
+      // first .next() call.
       auto *initGenBB = Builder.createBasicBlock(newFunction);
       Builder.setInsertionBlock(initGenBB);
-      Builder.createStartGeneratorInst();
       auto *prologueBB = Builder.createBasicBlock(newFunction);
       auto *prologueResumeIsReturn = Builder.createAllocStackInst(
           genAnonymousLabelName("isReturn_prologue"), Type::createBoolean());
@@ -900,6 +900,12 @@ void ESTreeIRGen::emitScopeDeclarations(sema::LexicalScope *scope) {
         break;
       }
 
+      case sema::Decl::Kind::PrivateField:
+      case sema::Decl::Kind::PrivateMethod:
+      case sema::Decl::Kind::PrivateGetter:
+      case sema::Decl::Kind::PrivateSetter:
+      case sema::Decl::Kind::PrivateGetterSetter:
+        // Private names are handled separately.
       case sema::Decl::Kind::Parameter:
         // Skip parameters, they are handled separately.
         continue;

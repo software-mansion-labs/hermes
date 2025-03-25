@@ -374,11 +374,13 @@ class LReference {
       ESTree::Node *ast,
       Value *base,
       Value *property,
-      SMLoc loadLoc)
+      SMLoc loadLoc,
+      Value *thisVal = nullptr)
       : kind_(kind), irgen_(irgen), declInit_(declInit) {
     ast_ = ast;
     base_ = base;
     property_ = property;
+    thisValue_ = thisVal;
     loadLoc_ = loadLoc;
   }
 
@@ -423,6 +425,10 @@ class LReference {
       /// The name/value of the field this reference accesses, or null if this
       /// is a variable access.
       Value *property_;
+
+      /// Corresponds to [[ThisValue]] in ES15 6.2.5 Reference Record. Only
+      /// populated for super references.
+      Value *thisValue_;
     };
 
     /// Destructuring assignment target.
@@ -870,11 +876,14 @@ class ESTreeIRGen {
       ESTree::MemberExpressionNode *mem,
       Value *baseValue,
       Value *propValue);
+  /// \param thisValue is the value of `this` when the member expression was
+  /// first evaluated. This is only populated in `super` references.
   void emitMemberStore(
       ESTree::MemberExpressionNode *mem,
       Value *storedValue,
       Value *baseValue,
-      Value *propValue);
+      Value *propValue,
+      Value *thisValue);
 
   /// emitMemberStore for the specific case where the member is a typed class
   /// field.
@@ -1296,6 +1305,13 @@ class ESTreeIRGen {
     return getDeclData(getIDDecl(id));
   }
 
+  /// Resolve the identifier node associated with the promoted function
+  /// to the corresponding global variable in expression context.
+  Value *resolveIdentifierPromoted(ESTree::IdentifierNode *id) {
+    auto *declPromoted = getIDDeclPromoted(id);
+    return declPromoted ? getDeclData(declPromoted) : nullptr;
+  }
+
   /// Cast the node to ESTree::IdentifierNode and resolve it to an expression
   /// decl.
   Value *resolveIdentifierFromID(ESTree::Node *id) {
@@ -1554,6 +1570,13 @@ class ESTreeIRGen {
     assert(id && "IdentifierNode cannot be null");
     sema::Decl *decl = semCtx_.getExpressionDecl(id);
     assert(decl && "identifier must be resolved");
+    return decl;
+  }
+
+  /// Return the global Decl associated with the promoted function identifier.
+  sema::Decl *getIDDeclPromoted(ESTree::IdentifierNode *id) {
+    assert(id && "IdentifierNode cannot be null");
+    sema::Decl *decl = semCtx_.getPromotedDecl(id);
     return decl;
   }
 

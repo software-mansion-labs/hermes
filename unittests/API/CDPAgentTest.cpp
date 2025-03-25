@@ -62,10 +62,7 @@ T waitFor(
 
   callback(promise);
 
-  auto status = future.wait_for(std::chrono::milliseconds(2500));
-  if (status != std::future_status::ready) {
-    throw std::runtime_error("triggerInterrupt didn't get executed: " + reason);
-  }
+  future.wait();
   return future.get();
 }
 
@@ -130,7 +127,7 @@ class CDPAgentTest : public ::testing::Test {
   /// from the debugger. returns the message. throws on timeout.
   std::string waitForMessage(
       std::string context = "reply",
-      std::chrono::milliseconds timeout = std::chrono::milliseconds(2500));
+      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
   /// check to see if a response or notification is immediately available.
   /// returns the message, or nullopt if no message is available.
@@ -361,11 +358,17 @@ void CDPAgentTest::waitForScheduledScripts() {
 
 std::string CDPAgentTest::waitForMessage(
     std::string context,
-    std::chrono::milliseconds timeout) {
+    std::optional<std::chrono::milliseconds> timeout) {
   std::unique_lock<std::mutex> lock(messageMutex_);
 
-  bool success = hasMessage_.wait_for(
-      lock, timeout, [this]() -> bool { return !messages_.empty(); });
+  bool success;
+  if (timeout.has_value()) {
+    success = hasMessage_.wait_for(
+        lock, timeout.value(), [this]() -> bool { return !messages_.empty(); });
+  } else {
+    hasMessage_.wait(lock, [this]() -> bool { return !messages_.empty(); });
+    success = true;
+  }
 
   if (!success) {
     throw std::runtime_error("timed out waiting for " + context);
@@ -394,7 +397,7 @@ std::optional<std::string> CDPAgentTest::tryGetMessage() {
 void CDPAgentTest::expectNothing() {
   std::string message;
   try {
-    message = waitForMessage();
+    message = waitForMessage("nothing", std::chrono::milliseconds(2500));
   } catch (...) {
     // if no values are received it times out with an exception
     // so we can say that we've succeeded at seeing nothing
@@ -1795,6 +1798,55 @@ TEST_F(CDPAgentTest, DebuggerStepIntoBlackboxedRange) {
   waitForScheduledScripts();
 }
 
+TEST_F(CDPAgentTest, DebuggerStepIntoBlackboxedRangeWithBreakpoint) {
+  int msgId = 1;
+
+  sendAndCheckResponse("Debugger.enable", msgId++);
+
+  scheduleScript(R"(             // line 0
+    function addOne(val) {       // line 1 |
+      const val2 = val + 1;      // line 2 | [3] stop on this manual breakpoint
+      return val2;               // line 3 |
+    }                            // line 4 |
+
+    var a = 1 + 2;
+    debugger;                    // line 7 | [1] hit debugger statement, step over
+    var b = addOne(a);           // line 8 | [2] set blackboxed ranges, set manual breakpoint on line 2, step into
+    var c = b * b;
+  )");
+  auto note = expectNotification("Debugger.scriptParsed");
+  auto scriptID = jsonScope_.getString(note, {"params", "scriptId"});
+
+  // [1] -line 7- hit debugger statement, step over to line 8
+  ensurePaused(waitForMessage(), "other", {{"global", 7, 1}});
+  sendAndCheckResponse("Debugger.stepOver", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  ensurePaused(waitForMessage(), "step", {{"global", 8, 1}});
+
+  // [2] -line 8- set manual breakpoint on line 2
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 2);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{2}});
+
+  // [2] -line 8- blackbox the lines for addOne
+  sendSetBlackboxedRangesAndCheckResponse(msgId++, scriptID, {{0, 0}, {5, 0}});
+
+  // [2] -line 8- step into, verify stopping on the manual breakpoint on line 2
+  sendAndCheckResponse("Debugger.stepInto", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  ensurePaused(waitForMessage(), "step", {{"addOne", 2, 2}, {"global", 8, 1}});
+
+  // resume
+  sendAndCheckResponse("Debugger.resume", msgId++);
+  ensureNotification(waitForMessage(), "Debugger.resumed");
+  waitForScheduledScripts();
+}
+
 TEST_F(CDPAgentTest, DebuggerStepOverInsideBlackboxedRange) {
   int msgId = 1;
 
@@ -2775,6 +2827,76 @@ TEST_F(CDPAgentTest, DebuggerRemoveBreakpoint) {
   // Make sure the script runs to finish after this, which indicates it didn't
   // get stopped by breakpoint in the second iteration of the loop.
   waitForScheduledScripts();
+}
+
+TEST_F(CDPAgentTest, DebuggerBreakpointsSurviveDomainReload) {
+  int msgId = 1;
+
+  // Wait for a script to be run in the VM prior to Debugger.enable
+  scheduleScript(R"(
+    const a = 100;
+    const b = a + 1;
+  )");
+
+  // Verify that upon enable, we get notification of existing scripts
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 1);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{1}});
+
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureNotification(waitForMessage(), "Debugger.breakpointResolved");
+  ensureOkResponse(waitForMessage(), msgId++);
+}
+
+TEST_F(CDPAgentTest, DebuggerBreakpointsPauseVMAfterDomainReload) {
+  int msgId = 1;
+
+  scheduleScript(R"(
+    signalTest();
+
+    while (!shouldStop()) {}
+
+    const x = 1; // (line 5)
+  )");
+  // Wait for the script to start.
+  waitForTestSignal();
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  sendRequest(
+      "Debugger.setBreakpointByUrl", msgId, [](::hermes::JSONEmitter &json) {
+        json.emitKeyValue("url", kDefaultUrl);
+        json.emitKeyValue("lineNumber", 5);
+        json.emitKeyValue("columnNumber", 0);
+      });
+  ensureSetBreakpointByUrlResponse(
+      waitForMessage("setBreakpointByUrl"), msgId++, {{5}});
+
+  sendAndCheckResponse("Debugger.disable", msgId++);
+
+  sendParameterlessRequest("Debugger.enable", msgId);
+  ensureNotification(waitForMessage(), "Debugger.scriptParsed");
+  ensureNotification(waitForMessage(), "Debugger.breakpointResolved");
+  ensureOkResponse(waitForMessage(), msgId++);
+
+  // Allow the JavaScript code to continue running.
+  stopFlag_.store(true);
+
+  ensurePaused(waitForMessage(), "other", {{"global", 5, 0}});
 }
 
 TEST_F(CDPAgentTest, DebuggerRestoreState) {

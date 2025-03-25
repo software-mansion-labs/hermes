@@ -86,6 +86,11 @@ class JITContext {
     forceJIT_ = force;
   }
 
+  /// Set the memory limit for JIT'ed code in bytes.
+  void setMemoryLimit(uint32_t memoryLimit) {
+    memoryLimit_ = memoryLimit;
+  }
+
   /// Set the flag to emit asserts in the JIT'ed code.
   void setEmitAsserts(bool emitAsserts) {
     emitAsserts_ = emitAsserts;
@@ -107,6 +112,9 @@ class JITContext {
 
   /// Whether JIT compilation is enabled.
   bool enabled_{false};
+  /// The memory limit for JIT'ed code in bytes.
+  /// Once the limit is reached, no more code will be JIT'ed.
+  uint32_t memoryLimit_{32u << 20};
   /// whether to dump JIT'ed code
   unsigned dumpJITCode_{0};
   /// whether to fatally crash on JIT compilation errors
@@ -134,7 +142,7 @@ inline JITCompiledFunctionPtr JITContext::compile(
   if (LLVM_LIKELY(codeBlock->getDontJIT()))
     return nullptr;
 
-  uint32_t loopDepth = codeBlock->getFunctionHeader().loopDepth();
+  uint32_t loopDepth = codeBlock->getFunctionHeader().getLoopDepth();
   // It's possible that if the loop depth is too high, we will set the
   // execThreshold to 0 for this function, but that's OK because we want to JIT
   // it immediately.

@@ -50,6 +50,7 @@ class IRBuilder {
   //--------------------------------------------------------------------------//
 
   enum class PropEnumerable { No = 0, Yes = 1 };
+  enum class StoreStrict { No = 0, Yes = 1 };
 
   Module *getModule() {
     return M;
@@ -305,12 +306,12 @@ class IRBuilder {
       AllocStackInst *homeObjectOutput);
 
   CreateFunctionInst *createCreateFunctionInst(
-      Instruction *scope,
+      BaseScopeInst *scope,
       Function *code);
 
   GetParentScopeInst *createGetParentScopeInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
   CreateScopeInst *createCreateScopeInst(
       VariableScope *scope,
@@ -326,9 +327,8 @@ class IRBuilder {
       Instruction *startScope,
       LiteralNumber *numLevels);
 
-  GetClosureScopeInst *createGetClosureScopeInst(
-      VariableScope *scope,
-      Value *closure);
+  GetClosureScopeInst *
+  createGetClosureScopeInst(VariableScope *scope, Function *F, Value *closure);
 
   LoadStackInst *createLoadStackInst(AllocStackInst *ptr);
 
@@ -412,10 +412,21 @@ class IRBuilder {
       Value *property);
 
   LoadPropertyInst *createLoadPropertyInst(Value *object, Value *property);
+  LoadPropertyWithReceiverInst *createLoadPropertyWithReceiverInst(
+      Value *object,
+      Value *property,
+      Value *receiver);
   TryLoadGlobalPropertyInst *createTryLoadGlobalPropertyInst(
       LiteralString *property);
   TryLoadGlobalPropertyInst *createTryLoadGlobalPropertyInst(
       GlobalObjectProperty *property);
+
+  StorePropertyWithReceiverInst *createStorePropertyWithReceiverInst(
+      Value *storedValue,
+      Value *object,
+      Value *property,
+      Value *receiver,
+      StoreStrict isStrict);
 
   StorePropertyInst *
   createStorePropertyInst(Value *storedValue, Value *object, Value *property);
@@ -449,8 +460,7 @@ class IRBuilder {
   DefineNewOwnPropertyInst *createDefineNewOwnPropertyInst(
       Value *storedValue,
       Value *object,
-      Literal *property,
-      PropEnumerable isEnumerable);
+      Literal *property);
 
   DefineOwnGetterSetterInst *createDefineOwnGetterSetterInst(
       Value *storedGetter,
@@ -492,6 +502,10 @@ class IRBuilder {
   AllocObjectLiteralInst *createAllocObjectLiteralInst(
       const AllocObjectLiteralInst::ObjectPropertyMap &propMap = {},
       Value *parentObject = nullptr);
+
+  AllocTypedObjectInst *createAllocTypedObjectInst(
+      const AllocTypedObjectInst::ObjectPropertyMap &propMap,
+      Value *parentObject);
 
   AllocFastArrayInst *createAllocFastArrayInst(LiteralNumber *sizeHint);
 
@@ -581,10 +595,8 @@ class IRBuilder {
       BasicBlock *nextBlock);
 
   CreateGeneratorInst *createCreateGeneratorInst(
-      Instruction *scope,
+      BaseScopeInst *scope,
       NormalFunction *innerFn);
-
-  StartGeneratorInst *createStartGeneratorInst();
 
   ResumeGeneratorInst *createResumeGeneratorInst(AllocStackInst *isReturn);
 
@@ -595,7 +607,7 @@ class IRBuilder {
   HBCResolveParentEnvironmentInst *createHBCResolveParentEnvironmentInst(
       VariableScope *scope,
       LiteralNumber *numLevels,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
   SwitchImmInst *createSwitchImmInst(
       Value *input,
@@ -611,7 +623,7 @@ class IRBuilder {
 
   HBCCreateFunctionEnvironmentInst *createHBCCreateFunctionEnvironmentInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam);
+      JSSpecialParam *parentScopeParam);
 
   LIRGetThisNSInst *createLIRGetThisNSInst();
 

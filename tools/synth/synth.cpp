@@ -139,6 +139,12 @@ struct Flags : public cli::RuntimeFlags {
       cat(GCCategory),
       init(true)};
 
+  opt<bool> GCPrintCollectionStats{
+      "gc-print-collection-stats",
+      desc("Output statistics for each garbage collection at exit"),
+      cat(GCCategory),
+      init(false)};
+
   opt<bool> BasicBlockProfiling{
       "basic-block-profiling",
       init(false),
@@ -289,7 +295,17 @@ int main(int argc, char **argv) {
       llvh::EnableStatistics();
 #endif
 
-    options.gcConfigBuilder.withShouldRecordStats(shouldPrintGCStats);
+    std::vector<GCAnalyticsEvent> gcAnalyticsEvents;
+    if (shouldPrintGCStats) {
+      options.gcConfigBuilder.withShouldRecordStats(true);
+      if (cl::flags.GCPrintCollectionStats) {
+        options.gcAnalyticsEvents = &gcAnalyticsEvents;
+        options.gcConfigBuilder.withAnalyticsCallback(
+            [&gcAnalyticsEvents](const ::hermes::vm::GCAnalyticsEvent &event) {
+              gcAnalyticsEvents.push_back(event);
+            });
+      }
+    }
     if (minHeapSize) {
       options.gcConfigBuilder.withMinHeapSize(*minHeapSize);
     }

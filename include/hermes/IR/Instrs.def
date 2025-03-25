@@ -96,6 +96,7 @@ DEF_TAG(BinaryInstanceOfInst, BinaryOperatorInst)
 END_VALUE(BinaryOperatorInst)
 
 MARK_FIRST(BaseStorePropertyInst, Instruction)
+DEF_VALUE(StorePropertyWithReceiverInst, BaseStorePropertyInst)
 MARK_FIRST(StorePropertyInst, BaseStorePropertyInst)
 DEF_VALUE(StorePropertyLooseInst, StorePropertyInst)
 DEF_VALUE(StorePropertyStrictInst, StorePropertyInst)
@@ -121,6 +122,7 @@ MARK_LAST(DeletePropertyInst)
 
 MARK_FIRST(BaseLoadPropertyInst, Instruction)
 DEF_VALUE(LoadPropertyInst, BaseLoadPropertyInst)
+DEF_VALUE(LoadPropertyWithReceiverInst, BaseLoadPropertyInst)
 DEF_VALUE(TryLoadGlobalPropertyInst, BaseLoadPropertyInst)
 MARK_LAST(BaseLoadPropertyInst)
 
@@ -129,7 +131,12 @@ DEF_VALUE(StoreFrameInst, Instruction)
 DEF_VALUE(AllocStackInst, Instruction)
 DEF_VALUE(AllocArrayInst, Instruction)
 DEF_VALUE(AllocFastArrayInst, Instruction)
-DEF_VALUE(AllocObjectLiteralInst, Instruction)
+
+MARK_FIRST(BaseAllocObjectLiteralInst, Instruction)
+DEF_VALUE(AllocObjectLiteralInst, BaseAllocObjectLiteralInst)
+DEF_VALUE(AllocTypedObjectInst, BaseAllocObjectLiteralInst)
+MARK_LAST(BaseAllocObjectLiteralInst)
+
 DEF_VALUE(GetTemplateObjectInst, Instruction)
 DEF_VALUE(CatchInst, Instruction)
 DEF_VALUE(DebuggerInst, Instruction)
@@ -209,7 +216,6 @@ DEF_VALUE(CreateThisInst, Instruction)
 DEF_VALUE(GetConstructedObjectInst, Instruction)
 
 DEF_VALUE(GetBuiltinClosureInst, Instruction)
-DEF_VALUE(StartGeneratorInst, Instruction)
 DEF_VALUE(ResumeGeneratorInst, Instruction)
 
 MARK_FIRST(BaseScopeInst, Instruction)

@@ -67,6 +67,7 @@ void JSParserImpl::initializeIdentifiers() {
   packageIdent_ = lexer_.getIdentifier("package");
   privateIdent_ = lexer_.getIdentifier("private");
   protectedIdent_ = lexer_.getIdentifier("protected");
+  prototypeIdent_ = lexer_.getIdentifier("prototype");
   publicIdent_ = lexer_.getIdentifier("public");
   staticIdent_ = lexer_.getIdentifier("static");
   methodIdent_ = lexer_.getIdentifier("method");
@@ -89,7 +90,6 @@ void JSParserImpl::initializeIdentifiers() {
   keyofIdent_ = lexer_.getIdentifier("keyof");
   declareIdent_ = lexer_.getIdentifier("declare");
   protoIdent_ = lexer_.getIdentifier("proto");
-  prototypeIdent_ = lexer_.getIdentifier("prototype");
   opaqueIdent_ = lexer_.getIdentifier("opaque");
   plusIdent_ = lexer_.getIdentifier("plus");
   minusIdent_ = lexer_.getIdentifier("minus");
@@ -1109,11 +1109,14 @@ JSParserImpl::parseVariableStatement(Param param) {
 
 Optional<ESTree::PrivateNameNode *> JSParserImpl::parsePrivateName() {
   assert(check(TokenKind::private_identifier));
+  auto *privateIdent = tok_->getPrivateIdentifier();
   ESTree::Node *ident = setLocation(
       tok_,
       tok_,
-      new (context_)
-          ESTree::IdentifierNode(tok_->getPrivateIdentifier(), nullptr, false));
+      new (context_) ESTree::IdentifierNode(privateIdent, nullptr, false));
+  if (privateIdent == constructorIdent_) {
+    error(ident->getSourceRange(), "Private names cannot be '#constructor'");
+  }
   SMLoc start = advance(JSLexer::GrammarContext::AllowDiv).Start;
   return setLocation(
       start, ident, new (context_) ESTree::PrivateNameNode(ident));
@@ -3639,8 +3642,7 @@ Optional<ESTree::Node *> JSParserImpl::parseCallExpression(
       // but roll back if it just ended up being a comparison operator.
       SourceErrorManager::SaveAndSuppressMessages suppress{
           &sm_, Subsystem::Parser};
-      auto optTypeArgs =
-          context_.getParseTS() ? parseTSTypeArguments() : parseTypeArgsFlow();
+      auto optTypeArgs = parseTypeArguments();
       if (optTypeArgs && check(TokenKind::l_paren)) {
         // Call expression with type arguments.
         typeArgs = *optTypeArgs;
@@ -3787,8 +3789,7 @@ Optional<ESTree::Node *> JSParserImpl::parseNewExpressionOrOptionalExpression(
     // but roll back if it just ended up being a comparison operator.
     SourceErrorManager::SaveAndSuppressMessages suppress{
         &sm_, Subsystem::Parser};
-    auto optTypeArgs =
-        context_.getParseTS() ? parseTSTypeArguments() : parseTypeArgsFlow();
+    auto optTypeArgs = parseTypeArguments();
     if (optTypeArgs) {
       // New expression with type arguments.
       typeArgs = *optTypeArgs;
@@ -3868,8 +3869,7 @@ Optional<ESTree::Node *> JSParserImpl::parseLeftHandSideExpressionTail(
     // Suppress messages from the parser while still displaying lexer messages.
     SourceErrorManager::SaveAndSuppressMessages suppress{
         &sm_, Subsystem::Parser};
-    auto optTypeArgs =
-        context_.getParseTS() ? parseTSTypeArguments() : parseTypeArgsFlow();
+    auto optTypeArgs = parseTypeArguments();
     if (optTypeArgs && check(TokenKind::l_paren)) {
       // Call expression with type arguments.
       typeArgs = *optTypeArgs;
@@ -4126,34 +4126,37 @@ Optional<ESTree::Node *> JSParserImpl::parseBinaryExpression(Param param) {
           new (context_) ESTree::LogicalExpressionNode(left, right, opIdent));
 #if HERMES_PARSE_TS || HERMES_PARSE_FLOW
     } else if (LLVM_UNLIKELY(opKind == TokenKind::as_operator)) {
+#if HERMES_PARSE_TS
       if (context_.getParseTS()) {
         return setLocation(
             startLoc,
             endLoc,
             new (context_) ESTree::TSAsExpressionNode(left, right));
-      } else {
-        assert(context_.getParseFlow() && "must be parsing types");
-        if (auto *gen =
-                llvh::dyn_cast<ESTree::GenericTypeAnnotationNode>(right);
-            gen && !gen->_typeParameters && gen->getParens() == 0) {
-          if (auto *ident = llvh::dyn_cast<ESTree::IdentifierNode>(gen->_id)) {
-            if (ident->_name == constIdent_ && !ident->_optional &&
-                !ident->_typeAnnotation) {
-              // Special case for `x as const`,
-              // which only is used when the `const` type has no parens
-              // (otherwise, it's just a GenericTypeAnnotationNode).
-              return setLocation(
-                  startLoc,
-                  endLoc,
-                  new (context_) ESTree::AsConstExpressionNode(left));
-            }
+      }
+#endif
+#if HERMES_PARSE_FLOW
+      assert(context_.getParseFlow() && "must be parsing types");
+      if (auto *gen = llvh::dyn_cast<ESTree::GenericTypeAnnotationNode>(right);
+          gen && !gen->_typeParameters && gen->getParens() == 0) {
+        if (auto *ident = llvh::dyn_cast<ESTree::IdentifierNode>(gen->_id)) {
+          if (ident->_name == constIdent_ && !ident->_optional &&
+              !ident->_typeAnnotation) {
+            // Special case for `x as const`,
+            // which only is used when the `const` type has no parens
+            // (otherwise, it's just a GenericTypeAnnotationNode).
+            return setLocation(
+                startLoc,
+                endLoc,
+                new (context_) ESTree::AsConstExpressionNode(left));
           }
         }
-        return setLocation(
-            startLoc,
-            endLoc,
-            new (context_) ESTree::AsExpressionNode(left, right));
       }
+      return setLocation(
+          startLoc,
+          endLoc,
+          new (context_) ESTree::AsExpressionNode(left, right));
+#endif
+      llvm_unreachable("Must be parsing types");
 #endif
     } else {
       return setLocation(
@@ -5088,6 +5091,10 @@ Optional<ESTree::Node *> JSParserImpl::parseClassElement(
       return None;
     }
     if (isPrivate) {
+      if (llvh::cast<ESTree::IdentifierNode>(prop)->_name ==
+          constructorIdent_) {
+        error(prop->getSourceRange(), "Private names cannot be '#constructor'");
+      }
       if (accessibility) {
         error(
             startRange,

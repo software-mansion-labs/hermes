@@ -93,7 +93,7 @@ class JITContext::Compiler {
             jc.getDumpJITCode(),
             jc.getEmitAsserts(),
             codeBlock,
-            codeBlock->propertyCache(),
+            codeBlock->readPropertyCache(),
             codeBlock->writePropertyCache(),
             // TODO: is getFrameSize() the right thing to call?
             codeBlock->getFrameSize(),
@@ -244,8 +244,8 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
   // Any code emitted at the start gets treated as the first instruction.
   em_.emittingIP = (const inst::Inst *)codeBlock_->begin();
   em_.enter(
-      codeBlock_->getFunctionHeader().numberRegCount(),
-      codeBlock_->getFunctionHeader().nonPtrRegCount());
+      codeBlock_->getFunctionHeader().getNumberRegCount(),
+      codeBlock_->getFunctionHeader().getNonPtrRegCount());
 
   for (uint32_t bbIndex = 0, e = basicBlocks_.size() - 1; bbIndex < e;
        ++bbIndex) {
@@ -261,8 +261,30 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     handlers.push_back(&bbLabels_.at(ofsToBBIndex_.at(entry.target)));
   }
 
-  em_.leave();
-  codeBlock_->setJITCompiled(em_.addToRuntime(jc_.impl_->jr, handlers));
+  // Emit the leave before getting the codeSize so the measurement is accurate.
+  em_.leave(handlers);
+
+  size_t memoryLimit = jc_.memoryLimit_;
+  size_t usedSize =
+      jc_.impl_->jr.allocator()->statistics().usedSize() + em_.code.codeSize();
+
+  if (LLVM_UNLIKELY(usedSize > memoryLimit)) {
+    // Disable the JIT if we would go over the memory limit.
+    // The enabled_ check in the inline path remains fast,
+    // and the chances that someone else will reenable it are low.
+    // This does mean that if we are unable to JIT a large function,
+    // we won't potentially be able to JIT smaller functions later.
+    jc_.enabled_ = false;
+    return nullptr;
+  }
+
+  codeBlock_->setJITCompiled(em_.addToRuntime(jc_.impl_->jr));
+
+  if (LLVM_UNLIKELY(usedSize == memoryLimit)) {
+    // Disable compilation for the future because we've hit the limit,
+    // but this function is fine.
+    jc_.enabled_ = false;
+  }
 
   LLVM_DEBUG(
       llvh::outs() << "\n Bytecode:";
@@ -281,7 +303,8 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
       });
 
   if (jc_.dumpJITCode_ & (DumpJitCode::Code | DumpJitCode::CompileStatus)) {
-    llvh::outs() << "\nJIT successfully compiled FunctionID "
+    llvh::outs() << "\nJIT total memory usage (bytes): " << usedSize << "\n";
+    llvh::outs() << "JIT successfully compiled FunctionID "
                  << codeBlock_->getFunctionID() << ", '" << funcName_ << "'\n";
   }
 
@@ -294,10 +317,8 @@ JITCompiledFunctionPtr JITContext::Compiler::compileCodeBlockImpl() {
     _sh_longjmp(errorJmpBuf_, 1);                                              \
   }
 
-EMIT_UNIMPLEMENTED(GetEnvironment)
 EMIT_UNIMPLEMENTED(DirectEval)
 EMIT_UNIMPLEMENTED(AsyncBreakCheck)
-EMIT_UNIMPLEMENTED(CacheNewObject)
 
 #undef EMIT_UNIMPLEMENTED
 
@@ -381,6 +402,11 @@ inline void JITContext::Compiler::emitMov(const inst::MovInst *inst) {
 
 inline void JITContext::Compiler::emitMovLong(const inst::MovLongInst *inst) {
   em_.mov(FR(inst->op1), FR(inst->op2));
+}
+
+inline void JITContext::Compiler::emitCacheNewObject(
+    const inst::CacheNewObjectInst *inst) {
+  // TODO: Implement CacheNewObject.
 }
 
 inline void JITContext::Compiler::emitToNumber(const inst::ToNumberInst *inst) {
@@ -611,6 +637,20 @@ inline void JITContext::Compiler::emitGetByIdShort(
   em_.getById(FR(inst->op1), idVal, FR(inst->op2), cacheIdx);
 }
 
+inline void JITContext::Compiler::emitGetByIdWithReceiverLong(
+    const inst::GetByIdWithReceiverLongInst *inst) {
+  auto idVal = ID(inst->op5);
+  auto cacheIdx = inst->op3;
+  em_.getByIdWithReceiver(
+      FR(inst->op1), idVal, FR(inst->op2), FR(inst->op4), cacheIdx);
+}
+
+inline void JITContext::Compiler::emitGetByValWithReceiver(
+    const inst::GetByValWithReceiverInst *inst) {
+  em_.getByValWithReceiver(
+      FR(inst->op1), FR(inst->op2), FR(inst->op3), FR(inst->op4));
+}
+
 inline void JITContext::Compiler::emitTryPutByIdLooseLong(
     const inst::TryPutByIdLooseLongInst *inst) {
   auto idVal = ID(inst->op4);
@@ -678,6 +718,16 @@ EMIT_BY_VAL(PutByValStrict, putByValStrict)
 
 #undef EMIT_BY_VAL
 
+inline void JITContext::Compiler::emitPutByValWithReceiver(
+    const inst::PutByValWithReceiverInst *inst) {
+  em_.putByValWithReceiver(
+      FR(inst->op1),
+      FR(inst->op2),
+      FR(inst->op3),
+      FR(inst->op4),
+      (bool)inst->op5);
+}
+
 inline void JITContext::Compiler::emitDelByVal(const inst::DelByValInst *inst) {
   em_.delByVal(FR(inst->op1), FR(inst->op2), FR(inst->op3), inst->op4);
 }
@@ -686,6 +736,16 @@ inline void JITContext::Compiler::emitGetByIndex(
     const inst::GetByIndexInst *inst) {
   em_.getByIndex(FR(inst->op1), FR(inst->op2), inst->op3);
 }
+
+#define EMIT_DEFINE_BY_ID(op)                                              \
+  inline void JITContext::Compiler::emit##op(const inst::op##Inst *inst) { \
+    auto idVal = ID(inst->op4);                                            \
+    auto cacheIdx = inst->op3;                                             \
+    em_.defineOwnById(FR(inst->op1), idVal, FR(inst->op2), cacheIdx);      \
+  }
+EMIT_DEFINE_BY_ID(DefineOwnById)
+EMIT_DEFINE_BY_ID(DefineOwnByIdLong)
+#undef EMIT_DEFINE_BY_ID
 
 inline void JITContext::Compiler::emitDefineOwnByIndex(
     const inst::DefineOwnByIndexInst *inst) {
@@ -712,20 +772,6 @@ inline void JITContext::Compiler::emitDefineOwnGetterSetterByVal(
       FR(inst->op4),
       (bool)inst->op5);
 }
-
-#define EMIT_PUT_NEW_OWN_BY_ID(name, enumerable)                               \
-  inline void JITContext::Compiler::emit##name(const inst::name##Inst *inst) { \
-    em_.putNewOwnById(                                                         \
-        FR(inst->op1), FR(inst->op2), ID(inst->op3), enumerable);              \
-  }
-
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnById, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnByIdLong, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnByIdShort, true)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnNEById, false)
-EMIT_PUT_NEW_OWN_BY_ID(PutNewOwnNEByIdLong, false)
-
-#undef EMIT_PUT_NEW_OWN_BY_ID
 
 #define EMIT_OWN_BY_SLOT_IDX(name, op)                                         \
   inline void JITContext::Compiler::emit##name(const inst::name##Inst *inst) { \
@@ -894,6 +940,11 @@ inline void JITContext::Compiler::emitCreateEnvironment(
 inline void JITContext::Compiler::emitGetParentEnvironment(
     const inst::GetParentEnvironmentInst *inst) {
   em_.getParentEnvironment(FR(inst->op1), inst->op2);
+}
+
+inline void JITContext::Compiler::emitGetEnvironment(
+    const inst::GetEnvironmentInst *inst) {
+  em_.getEnvironment(FR(inst->op1), FR(inst->op2), inst->op3);
 }
 
 inline void JITContext::Compiler::emitGetClosureEnvironment(
@@ -1131,6 +1182,10 @@ inline void JITContext::Compiler::emitThrow(const inst::ThrowInst *inst) {
 inline void JITContext::Compiler::emitThrowIfEmpty(
     const inst::ThrowIfEmptyInst *inst) {
   em_.throwIfEmpty(FR(inst->op1), FR(inst->op2));
+}
+inline void JITContext::Compiler::emitThrowIfUndefined(
+    const inst::ThrowIfUndefinedInst *inst) {
+  em_.throwIfUndefined(FR(inst->op1), FR(inst->op2));
 }
 
 inline void JITContext::Compiler::emitThrowIfThisInitialized(

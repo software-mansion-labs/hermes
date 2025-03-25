@@ -623,6 +623,9 @@ class BaseScopeInst : public Instruction {
   VariableScope *getVariableScope() const {
     return llvh::cast<VariableScope>(getOperand(VariableScopeIdx));
   }
+  void setVariableScope(VariableScope *scope) {
+    setOperand(scope, VariableScopeIdx);
+  }
 
   static llvh::Optional<Type> getInherentTypeImpl() {
     return Type::createEnvironment();
@@ -653,7 +656,7 @@ class GetParentScopeInst : public BaseScopeInst {
  public:
   explicit GetParentScopeInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam)
+      JSSpecialParam *parentScopeParam)
       : BaseScopeInst(ValueKind::GetParentScopeInstKind, scope) {
     pushOperand(parentScopeParam);
   }
@@ -662,8 +665,8 @@ class GetParentScopeInst : public BaseScopeInst {
       llvh::ArrayRef<Value *> operands)
       : BaseScopeInst(src, operands) {}
 
-  JSDynamicParam *getParentScopeParam() const {
-    return cast<JSDynamicParam>(getOperand(ParentScopeParamIdx));
+  JSSpecialParam *getParentScopeParam() const {
+    return cast<JSSpecialParam>(getOperand(ParentScopeParamIdx));
   }
 
   SideEffect getSideEffectImpl() const {
@@ -693,6 +696,9 @@ class CreateScopeInst : public BaseScopeInst {
 
   Value *getParentScope() const {
     return getOperand(ParentScopeIdx);
+  }
+  void setParentScope(Value *parentScope) {
+    setOperand(parentScope, ParentScopeIdx);
   }
 
   SideEffect getSideEffectImpl() const {
@@ -734,6 +740,13 @@ class ResolveScopeInst : public BaseScopeInst {
   void setStartScope(VariableScope *startVarScope, Instruction *scope) {
     setOperand(startVarScope, StartVarScopeIdx);
     setOperand(scope, StartScopeIdx);
+  }
+
+  /// Set only the start variable scope. \c setStartScope should be preferred,
+  /// except in the rare case that the VariableScope describing the result of
+  /// the incoming scope instruction is known to have changed.
+  void setStartVarScope(VariableScope *startVarScope) {
+    setOperand(startVarScope, StartVarScopeIdx);
   }
 
   SideEffect getSideEffectImpl() const {
@@ -786,11 +799,15 @@ class GetClosureScopeInst : public BaseScopeInst {
   GetClosureScopeInst(const GetClosureScopeInst &) = delete;
   void operator=(const GetClosureScopeInst &) = delete;
 
-  enum { ClosureIdx = BaseScopeInst::LAST_IDX };
+  enum { FunctionCodeIdx = BaseScopeInst::LAST_IDX, ClosureIdx };
 
  public:
-  explicit GetClosureScopeInst(VariableScope *varScope, Value *closure)
+  explicit GetClosureScopeInst(
+      VariableScope *varScope,
+      Function *F,
+      Value *closure)
       : BaseScopeInst(ValueKind::GetClosureScopeInstKind, varScope) {
+    pushOperand(F);
     pushOperand(closure);
   }
   explicit GetClosureScopeInst(
@@ -798,8 +815,11 @@ class GetClosureScopeInst : public BaseScopeInst {
       llvh::ArrayRef<Value *> operands)
       : BaseScopeInst(src, operands) {}
 
-  Value *getClosure() {
+  Value *getClosure() const {
     return cast<Instruction>(getOperand(ClosureIdx));
+  }
+  Function *getFunctionCode() const {
+    return cast<Function>(getOperand(FunctionCodeIdx));
   }
 
   SideEffect getSideEffectImpl() const {
@@ -918,22 +938,38 @@ class BaseCreateLexicalChildInst : public Instruction {
   explicit BaseCreateLexicalChildInst(
       ValueKind kind,
       Instruction *scope,
+      VariableScope *varScope,
       Function *code)
       : Instruction(kind) {
     pushOperand(scope);
+    pushOperand(varScope);
     pushOperand(code);
   }
 
  public:
-  enum { ScopeIdx, FunctionCodeIdx, LAST_IDX };
+  enum { ScopeIdx, VarScopeIdx, FunctionCodeIdx, LAST_IDX };
 
   explicit BaseCreateLexicalChildInst(
       const BaseCreateLexicalChildInst *src,
       llvh::ArrayRef<Value *> operands)
       : Instruction(src, operands) {}
 
-  Instruction *getScope() const {
-    return cast<Instruction>(getOperand(ScopeIdx));
+  /// Get and set the enclosing scope of the function. Note that this may be
+  /// EmptySentinel if the function does not use its enclosing scope.
+  Value *getScope() const {
+    return getOperand(ScopeIdx);
+  }
+  void setScope(Value *scope) {
+    setOperand(scope, ScopeIdx);
+  }
+
+  /// Get/set the enclosing VariableScope of the function. Note that this may be
+  /// EmptySentinel if the function does not use its enclosing scope.
+  Value *getVarScope() const {
+    return getOperand(VarScopeIdx);
+  }
+  void setVarScope(Value *scope) {
+    setOperand(scope, VarScopeIdx);
   }
 
   Function *getFunctionCode() const {
@@ -965,8 +1001,9 @@ class BaseCreateCallableInst : public BaseCreateLexicalChildInst {
   explicit BaseCreateCallableInst(
       ValueKind kind,
       Instruction *scope,
+      VariableScope *varScope,
       Function *code)
-      : BaseCreateLexicalChildInst(kind, scope, code) {
+      : BaseCreateLexicalChildInst(kind, scope, varScope, code) {
     setType(*getInherentTypeImpl());
   }
 
@@ -991,8 +1028,15 @@ class CreateFunctionInst : public BaseCreateCallableInst {
   void operator=(const CreateFunctionInst &) = delete;
 
  public:
-  explicit CreateFunctionInst(Instruction *scope, Function *code)
-      : BaseCreateCallableInst(ValueKind::CreateFunctionInstKind, scope, code) {
+  explicit CreateFunctionInst(
+      Instruction *scope,
+      VariableScope *varScope,
+      Function *code)
+      : BaseCreateCallableInst(
+            ValueKind::CreateFunctionInstKind,
+            scope,
+            varScope,
+            code) {
     assert(
         (llvh::isa<NormalFunction>(code) ||
          llvh::isa<GeneratorFunction>(code) ||
@@ -1020,7 +1064,11 @@ class CreateClassInst : public BaseCreateCallableInst {
       Function *code,
       Value *superClass,
       AllocStackInst *homeObjectOutput)
-      : BaseCreateCallableInst(ValueKind::CreateClassInstKind, scope, code) {
+      : BaseCreateCallableInst(
+            ValueKind::CreateClassInstKind,
+            scope,
+            scope->getVariableScope(),
+            code) {
     assert(
         (llvh::isa<NormalFunction>(code)) &&
         "Only NormalFunction supported by CreateClassInst");
@@ -1477,7 +1525,7 @@ class BaseStorePropertyInst : public Instruction {
   }
 
  public:
-  enum { StoredValueIdx, ObjectIdx, PropertyIdx };
+  enum { StoredValueIdx, ObjectIdx, PropertyIdx, _LastIdx };
 
   explicit BaseStorePropertyInst(
       const BaseStorePropertyInst *src,
@@ -1507,6 +1555,45 @@ class BaseStorePropertyInst : public Instruction {
 
   static bool classof(const Value *V) {
     return HERMES_IR_KIND_IN_CLASS(V->getKind(), BaseStorePropertyInst);
+  }
+};
+
+class StorePropertyWithReceiverInst : public BaseStorePropertyInst {
+  StorePropertyWithReceiverInst(const StorePropertyWithReceiverInst &) = delete;
+  void operator=(const StorePropertyWithReceiverInst &) = delete;
+
+ public:
+  enum { ReceiverIdx = BaseStorePropertyInst::_LastIdx, IsStrictIdx };
+
+  explicit StorePropertyWithReceiverInst(
+      Value *storedValue,
+      Value *globalObject,
+      Value *property,
+      Value *receiver,
+      LiteralBool *isStrict)
+      : BaseStorePropertyInst(
+            ValueKind::StorePropertyWithReceiverInstKind,
+            storedValue,
+            globalObject,
+            property) {
+    pushOperand(receiver);
+    pushOperand(isStrict);
+  }
+  explicit StorePropertyWithReceiverInst(
+      const StorePropertyWithReceiverInst *src,
+      llvh::ArrayRef<Value *> operands)
+      : BaseStorePropertyInst(src, operands) {}
+
+  Value *getReceiver() const {
+    return getOperand(ReceiverIdx);
+  }
+
+  bool getIsStrict() const {
+    return cast<LiteralBool>(getOperand(IsStrictIdx))->getValue();
+  }
+
+  static bool classof(const Value *V) {
+    return V->getKind() == ValueKind::StorePropertyWithReceiverInstKind;
   }
 };
 
@@ -1768,6 +1855,7 @@ class DefineNewOwnPropertyInst : public BaseDefineOwnPropertyInst {
     assert(
         object->getType().isObjectType() &&
         "object operand must be known to be an object");
+    assert(isEnumerable->getValue() && "isEnumerable should be true");
   }
 
   explicit DefineNewOwnPropertyInst(
@@ -1944,7 +2032,7 @@ class BaseLoadPropertyInst : public Instruction {
   }
 
  public:
-  enum { ObjectIdx, PropertyIdx };
+  enum { ObjectIdx, PropertyIdx, _LastIdx };
 
   Value *getObject() const {
     return getOperand(ObjectIdx);
@@ -1992,6 +2080,37 @@ class LoadPropertyInst : public BaseLoadPropertyInst {
   static bool classof(const Value *V) {
     ValueKind kind = V->getKind();
     return kind == ValueKind::LoadPropertyInstKind;
+  }
+};
+
+class LoadPropertyWithReceiverInst : public BaseLoadPropertyInst {
+  LoadPropertyWithReceiverInst(const LoadPropertyWithReceiverInst &) = delete;
+  void operator=(const LoadPropertyWithReceiverInst &) = delete;
+
+ public:
+  enum { ReceiverIdx = BaseLoadPropertyInst::_LastIdx };
+  explicit LoadPropertyWithReceiverInst(
+      Value *object,
+      Value *property,
+      Value *receiver)
+      : BaseLoadPropertyInst(
+            ValueKind::LoadPropertyWithReceiverInstKind,
+            object,
+            property) {
+    pushOperand(receiver);
+  }
+  explicit LoadPropertyWithReceiverInst(
+      const LoadPropertyWithReceiverInst *src,
+      llvh::ArrayRef<Value *> operands)
+      : BaseLoadPropertyInst(src, operands) {}
+
+  Value *getReceiver() const {
+    return getOperand(ReceiverIdx);
+  }
+
+  static bool classof(const Value *V) {
+    ValueKind kind = V->getKind();
+    return kind == ValueKind::LoadPropertyWithReceiverInstKind;
   }
 };
 
@@ -2061,6 +2180,9 @@ class HBCAllocObjectFromBufferInst : public Instruction {
   static bool isTyped() {
     return false;
   }
+  bool acceptsEmptyTypeImpl() const {
+    return true;
+  }
 
   SideEffect getSideEffectImpl() const {
     return {};
@@ -2084,19 +2206,20 @@ class HBCAllocObjectFromBufferInst : public Instruction {
   }
 };
 
-class AllocObjectLiteralInst : public Instruction {
-  AllocObjectLiteralInst(const AllocObjectLiteralInst &) = delete;
-  void operator=(const AllocObjectLiteralInst &) = delete;
+class BaseAllocObjectLiteralInst : public Instruction {
+  BaseAllocObjectLiteralInst(const BaseAllocObjectLiteralInst &) = delete;
+  void operator=(const BaseAllocObjectLiteralInst &) = delete;
 
  public:
-  enum { ParentObjectIdx, FirstKeyIdx };
+  enum { ParentObjectIdx, FirstKeyIdx, _LastIdx };
 
   using ObjectPropertyMap = llvh::SmallVector<std::pair<Literal *, Value *>, 4>;
 
-  explicit AllocObjectLiteralInst(
+  explicit BaseAllocObjectLiteralInst(
+      ValueKind kind,
       Value *parentObject,
       const ObjectPropertyMap &propMap)
-      : Instruction(ValueKind::AllocObjectLiteralInstKind) {
+      : Instruction(kind) {
     setType(*getInherentTypeImpl());
     pushOperand(parentObject);
     for (size_t i = 0; i < propMap.size(); i++) {
@@ -2104,9 +2227,8 @@ class AllocObjectLiteralInst : public Instruction {
       pushOperand(propMap[i].second);
     }
   }
-
-  explicit AllocObjectLiteralInst(
-      const AllocObjectLiteralInst *src,
+  explicit BaseAllocObjectLiteralInst(
+      const BaseAllocObjectLiteralInst *src,
       llvh::ArrayRef<Value *> operands)
       : Instruction(src, operands) {}
 
@@ -2134,8 +2256,7 @@ class AllocObjectLiteralInst : public Instruction {
   }
 
   static bool classof(const Value *V) {
-    ValueKind kind = V->getKind();
-    return kind == ValueKind::AllocObjectLiteralInstKind;
+    return HERMES_IR_KIND_IN_CLASS(V->getKind(), BaseAllocObjectLiteralInst);
   }
 
   static unsigned getKeyOperandIdx(unsigned index) {
@@ -2148,6 +2269,66 @@ class AllocObjectLiteralInst : public Instruction {
 
   Value *getValue(unsigned index) const {
     return getOperand(2 * index + 1 + FirstKeyIdx);
+  }
+};
+
+class AllocObjectLiteralInst : public BaseAllocObjectLiteralInst {
+  AllocObjectLiteralInst(const AllocObjectLiteralInst &) = delete;
+  void operator=(const AllocObjectLiteralInst &) = delete;
+
+ public:
+  explicit AllocObjectLiteralInst(
+      Value *parentObject,
+      const ObjectPropertyMap &propMap)
+      : BaseAllocObjectLiteralInst(
+            ValueKind::AllocObjectLiteralInstKind,
+            parentObject,
+            propMap) {}
+  explicit AllocObjectLiteralInst(
+      const AllocObjectLiteralInst *src,
+      llvh::ArrayRef<Value *> operands)
+      : BaseAllocObjectLiteralInst(src, operands) {}
+
+  static bool isTyped() {
+    return false;
+  }
+  bool acceptsEmptyTypeImpl() const {
+    return false;
+  }
+
+  static bool classof(const Value *V) {
+    ValueKind kind = V->getKind();
+    return kind == ValueKind::AllocObjectLiteralInstKind;
+  }
+};
+
+class AllocTypedObjectInst : public BaseAllocObjectLiteralInst {
+  AllocTypedObjectInst(const AllocTypedObjectInst &) = delete;
+  void operator=(const AllocTypedObjectInst &) = delete;
+
+ public:
+  explicit AllocTypedObjectInst(
+      Value *parentObject,
+      const ObjectPropertyMap &propMap)
+      : BaseAllocObjectLiteralInst(
+            ValueKind::AllocTypedObjectInstKind,
+            parentObject,
+            propMap) {}
+  explicit AllocTypedObjectInst(
+      const AllocTypedObjectInst *src,
+      llvh::ArrayRef<Value *> operands)
+      : BaseAllocObjectLiteralInst(src, operands) {}
+
+  static bool isTyped() {
+    return true;
+  }
+  bool acceptsEmptyTypeImpl() const {
+    return true;
+  }
+
+  static bool classof(const Value *V) {
+    ValueKind kind = V->getKind();
+    return kind == ValueKind::AllocTypedObjectInstKind;
   }
 };
 
@@ -3591,7 +3772,7 @@ class HBCResolveParentEnvironmentInst : public BaseScopeInst {
   explicit HBCResolveParentEnvironmentInst(
       VariableScope *scope,
       LiteralNumber *numLevels,
-      JSDynamicParam *parentScopeParam)
+      JSSpecialParam *parentScopeParam)
       : BaseScopeInst(ValueKind::HBCResolveParentEnvironmentInstKind, scope) {
     setType(*getInherentTypeImpl());
     pushOperand(numLevels);
@@ -3602,8 +3783,8 @@ class HBCResolveParentEnvironmentInst : public BaseScopeInst {
       llvh::ArrayRef<Value *> operands)
       : BaseScopeInst(src, operands) {}
 
-  JSDynamicParam *getParentScopeParam() const {
-    return cast<JSDynamicParam>(getOperand(ParentScopeParamIdx));
+  JSSpecialParam *getParentScopeParam() const {
+    return cast<JSSpecialParam>(getOperand(ParentScopeParamIdx));
   }
 
   LiteralNumber *getNumLevels() const {
@@ -3932,7 +4113,7 @@ class HBCCreateFunctionEnvironmentInst : public BaseScopeInst {
 
   explicit HBCCreateFunctionEnvironmentInst(
       VariableScope *scope,
-      JSDynamicParam *parentScopeParam)
+      JSSpecialParam *parentScopeParam)
       : BaseScopeInst(ValueKind::HBCCreateFunctionEnvironmentInstKind, scope) {
     assert(
         scope->getVariables().size() <=
@@ -3946,8 +4127,8 @@ class HBCCreateFunctionEnvironmentInst : public BaseScopeInst {
       llvh::ArrayRef<Value *> operands)
       : BaseScopeInst(src, operands) {}
 
-  JSDynamicParam *getParentScopeParam() const {
-    return cast<JSDynamicParam>(getOperand(ParentScopeParamIdx));
+  JSSpecialParam *getParentScopeParam() const {
+    return cast<JSSpecialParam>(getOperand(ParentScopeParamIdx));
   }
 
   SideEffect getSideEffectImpl() const {
@@ -4559,10 +4740,14 @@ class CreateGeneratorInst : public BaseCreateLexicalChildInst {
   void operator=(const CreateGeneratorInst &) = delete;
 
  public:
-  explicit CreateGeneratorInst(Instruction *scope, NormalFunction *genFunction)
+  explicit CreateGeneratorInst(
+      Instruction *scope,
+      VariableScope *varScope,
+      NormalFunction *genFunction)
       : BaseCreateLexicalChildInst(
             ValueKind::CreateGeneratorInstKind,
             scope,
+            varScope,
             genFunction) {
     setType(*getInherentTypeImpl());
   }
@@ -4577,37 +4762,6 @@ class CreateGeneratorInst : public BaseCreateLexicalChildInst {
 
   static bool classof(const Value *V) {
     return V->getKind() == ValueKind::CreateGeneratorInstKind;
-  }
-};
-
-class StartGeneratorInst : public Instruction {
-  StartGeneratorInst(const StartGeneratorInst &) = delete;
-  void operator=(const StartGeneratorInst &) = delete;
-
- public:
-  explicit StartGeneratorInst()
-      : Instruction(ValueKind::StartGeneratorInstKind) {
-    setType(Type::createNoType());
-  }
-  explicit StartGeneratorInst(
-      const StartGeneratorInst *src,
-      llvh::ArrayRef<Value *> operands)
-      : Instruction(src, operands) {}
-
-  static bool hasOutput() {
-    return false;
-  }
-  static bool isTyped() {
-    return false;
-  }
-
-  SideEffect getSideEffectImpl() const {
-    return SideEffect::createUnknown().setFirstInBlock();
-  }
-
-  static bool classof(const Value *V) {
-    ValueKind kind = V->getKind();
-    return kind == ValueKind::StartGeneratorInstKind;
   }
 };
 

@@ -481,7 +481,8 @@ class InstrGen {
       const llvh::DenseMap<BasicBlock *, unsigned> &bbMap,
       Function &F,
       ModuleGen &moduleGen,
-      uint32_t &nextCacheIdx,
+      uint32_t &nextWriteCacheIdx,
+      uint32_t &nextReadCacheIdx,
       const llvh::DenseMap<TryStartInst *, uint32_t> &tryIDs)
       : os_(os),
         ra_(ra),
@@ -489,7 +490,8 @@ class InstrGen {
         F_(F),
         nativeContext_(F.getContext().getNativeContext()),
         moduleGen_(moduleGen),
-        nextCacheIdx_(nextCacheIdx),
+        nextWriteCacheIdx_(nextWriteCacheIdx),
+        nextReadCacheIdx_(nextReadCacheIdx),
         tryIDs_(tryIDs) {
     if (!tryIDs_.empty())
       enclosingTrys_ = *findEnclosingTrysPerBlock(&F_);
@@ -531,8 +533,9 @@ class InstrGen {
   /// The state for the module currently being emitted.
   ModuleGen &moduleGen_;
 
-  /// Starts out at 0 and increments every time a cache index is used
-  uint32_t &nextCacheIdx_;
+  /// These starts at 0 and increments every time a cache index is used
+  uint32_t &nextWriteCacheIdx_;
+  uint32_t &nextReadCacheIdx_;
 
   /// Map from TryStart to an ID for the try/catch.
   /// Set the tryState to the ID when entering the try, restore it when leaving.
@@ -583,19 +586,31 @@ class InstrGen {
     os_ << "get_symbols(shUnit)[" << moduleGen_.stringTable.add(str) << ']';
     return genStringComment(str);
   }
+
   /// Generate a string constant, followed by an optional value (if non-null),
   /// and a cache index. This must be used when
   /// passing parameters to API functions that will use the cache index.
-  llvh::raw_ostream &genStringConstIC(
-      LiteralString *LS,
-      Value *optValue = nullptr) {
+  /// First function is common part, second and third are specializations for
+  /// read and write cache entries.
+  void genStringConstICCommon(LiteralString *LS, Value *optValue) {
     genStringConst(LS);
     if (optValue) {
       os_ << ", ";
       generateRegisterPtr(*optValue);
     }
     os_ << ", ";
-    return genIC(LS);
+  }
+  llvh::raw_ostream &genStringConstWriteIC(
+      LiteralString *LS,
+      Value *optValue = nullptr) {
+    genStringConstICCommon(LS, optValue);
+    return genWriteIC(LS);
+  }
+  llvh::raw_ostream &genStringConstReadIC(
+      LiteralString *LS,
+      Value *optValue = nullptr) {
+    genStringConstICCommon(LS, optValue);
+    return genReadIC(LS);
   }
 
   /// Generate a cache index. This must be used when passing parameters to API
@@ -604,8 +619,11 @@ class InstrGen {
   /// optimization controlled by OptimizationSettings::reusePropCache: that
   /// different instructions accessing the same property probably are for
   /// objects of the same hidden class, and should get the same offset.
-  llvh::raw_ostream &genIC(LiteralString *LS) {
-    return os_ << "get_prop_cache(shUnit) + " << nextCacheIdx_++;
+  llvh::raw_ostream &genWriteIC(LiteralString *LS) {
+    return os_ << "get_write_prop_cache(shUnit) + " << nextWriteCacheIdx_++;
+  }
+  llvh::raw_ostream &genReadIC(LiteralString *LS) {
+    return os_ << "get_read_prop_cache(shUnit) + " << nextReadCacheIdx_++;
   }
 
   /// Helper to generate a value in a register,
@@ -1144,6 +1162,19 @@ class InstrGen {
     os_ << ";\n";
   }
 
+  void generateStorePropertyWithReceiverInst(
+      StorePropertyWithReceiverInst &inst) {
+    os_ << "_sh_ljs_put_by_val_with_receiver_rjs(shr,&";
+    generateRegister(*inst.getObject());
+    os_ << ", &";
+    generateRegister(*inst.getProperty());
+    os_ << ", &";
+    generateRegister(*inst.getStoredValue());
+    os_ << ", &";
+    generateRegister(*inst.getReceiver());
+    os_ << ", " << inst.getIsStrict();
+    os_ << ");\n";
+  }
   void generateStorePropertyInstImpl(StorePropertyInst &inst, bool strictMode) {
     os_.indent(2);
     if (auto *LS = llvh::dyn_cast<LiteralString>(inst.getProperty())) {
@@ -1154,7 +1185,7 @@ class InstrGen {
       os_ << "(shr,&";
       generateRegister(*inst.getObject());
       os_ << ", ";
-      genStringConstIC(LS, inst.getStoredValue()) << ");\n";
+      genStringConstWriteIC(LS, inst.getStoredValue()) << ");\n";
       return;
     }
 
@@ -1191,7 +1222,7 @@ class InstrGen {
     os_ << ", ";
     auto prop = inst.getProperty();
     auto *propStr = cast<LiteralString>(prop);
-    genStringConstIC(propStr, inst.getStoredValue()) << ");\n";
+    genStringConstWriteIC(propStr, inst.getStoredValue()) << ");\n";
   }
   void generateTryStoreGlobalPropertyLooseInst(
       TryStoreGlobalPropertyLooseInst &inst) {
@@ -1210,25 +1241,37 @@ class InstrGen {
     // If the property is a LiteralNumber, the property is enumerable, and it is
     // a valid array index, it is coming from an array initialization and we
     // will emit it as DefineOwnByIndex.
-    auto *numProp = llvh::dyn_cast<LiteralNumber>(prop);
-    if (numProp && isEnumerable) {
-      if (auto arrayIndex = numProp->convertToArrayIndex()) {
-        uint32_t index = arrayIndex.getValue();
-        os_ << "_sh_ljs_put_own_by_index(";
-        os_ << "shr, ";
-        generateRegisterPtr(*inst.getObject());
-        os_ << ", ";
-        os_ << index << ", ";
-        generateRegisterPtr(*inst.getStoredValue());
-        os_ << ");\n";
-        return;
-      }
+    if (auto *numProp = llvh::dyn_cast<LiteralNumber>(prop)) {
+      assert(
+          inst.getIsEnumerable() &&
+          "Non-enumerable properties with literal keys should be handled by LoadConstants");
+      auto arrayIndex = numProp->convertToArrayIndex();
+      uint32_t index = arrayIndex.getValue();
+      os_ << "_sh_ljs_define_own_by_index(";
+      os_ << "shr, ";
+      generateRegisterPtr(*inst.getObject());
+      os_ << ", ";
+      os_ << index << ", ";
+      generateRegisterPtr(*inst.getStoredValue());
+      os_ << ");\n";
+      return;
+    }
+
+    if (auto *LS = llvh::dyn_cast<LiteralString>(prop)) {
+      assert(
+          inst.getIsEnumerable() &&
+          "Non-enumerable properties with literal keys should be handled by LoadConstants");
+      os_ << "_sh_ljs_define_own_by_id(shr,&";
+      generateRegister(*inst.getObject());
+      os_ << ", ";
+      genStringConstWriteIC(LS, inst.getStoredValue()) << ");\n";
+      return;
     }
 
     if (isEnumerable)
-      os_ << "_sh_ljs_put_own_by_val(";
+      os_ << "_sh_ljs_define_own_by_val(";
     else
-      os_ << "_sh_ljs_put_own_ne_by_val(";
+      os_ << "_sh_ljs_define_own_ne_by_val(";
 
     os_ << "shr, ";
     generateRegisterPtr(*inst.getObject());
@@ -1241,14 +1284,11 @@ class InstrGen {
   void generateDefineNewOwnPropertyInst(DefineNewOwnPropertyInst &inst) {
     os_.indent(2);
     auto prop = inst.getProperty();
-    bool isEnumerable = inst.getIsEnumerable();
+    assert(inst.getIsEnumerable() && "enumerable must be true.");
 
     if (auto *numProp = llvh::dyn_cast<LiteralNumber>(prop)) {
-      assert(
-          isEnumerable &&
-          "No way to generate non-enumerable indexed DefineNewOwnPropertyInst.");
       uint32_t index = *numProp->convertToArrayIndex();
-      os_ << "_sh_ljs_put_own_by_index(";
+      os_ << "_sh_ljs_define_own_by_index(";
       os_ << "shr, ";
       generateRegisterPtr(*inst.getObject());
       os_ << ", ";
@@ -1258,22 +1298,17 @@ class InstrGen {
       return;
     }
 
-    if (isEnumerable)
-      os_ << "_sh_ljs_put_new_own_by_id(";
-    else
-      os_ << "_sh_ljs_put_new_own_ne_by_id(";
-
-    os_ << "shr, ";
-    generateRegisterPtr(*inst.getObject());
+    auto *LS = cast<LiteralString>(prop);
+    os_ << "_sh_ljs_define_own_by_id(shr,&";
+    generateRegister(*inst.getObject());
     os_ << ", ";
-    auto *propStr = cast<LiteralString>(prop);
-    genStringConst(propStr) << ", ";
+    genStringConst(LS) << ", ";
     generateRegisterPtr(*inst.getStoredValue());
-    os_ << ");\n";
+    os_ << ", NULL);\n";
   }
   void generateDefineOwnGetterSetterInst(DefineOwnGetterSetterInst &inst) {
     os_.indent(2);
-    os_ << "_sh_ljs_put_own_getter_setter_by_val(";
+    os_ << "_sh_ljs_define_own_getter_setter_by_val(";
     os_ << "shr, ";
     generateRegisterPtr(*inst.getObject());
     os_ << ", ";
@@ -1318,7 +1353,7 @@ class InstrGen {
       os_ << "_sh_ljs_get_by_id_rjs(shr,&";
       generateRegister(*inst.getObject());
       os_ << ",";
-      genStringConstIC(LS) << ");\n";
+      genStringConstReadIC(LS) << ");\n";
       return;
     }
     // If the prop is an index-like constant, generate the special bytecode.
@@ -1337,6 +1372,29 @@ class InstrGen {
     generateRegister(*inst.getProperty());
     os_ << ");\n";
   }
+  void generateLoadPropertyWithReceiverInst(
+      LoadPropertyWithReceiverInst &inst) {
+    os_.indent(2);
+    generateValue(inst);
+    os_ << " = ";
+    auto prop = inst.getProperty();
+    if (auto *LS = llvh::dyn_cast<LiteralString>(prop)) {
+      os_ << "_sh_ljs_get_by_id_with_receiver_rjs(shr, &";
+      generateRegister(*inst.getObject());
+      os_ << ", &";
+      generateRegister(*inst.getReceiver());
+      os_ << ", ";
+      genStringConstReadIC(LS) << ");\n";
+      return;
+    }
+    os_ << "_sh_ljs_get_by_val_with_receiver_rjs(shr, &";
+    generateRegister(*inst.getObject());
+    os_ << ", &";
+    generateRegister(*inst.getProperty());
+    os_ << ", &";
+    generateRegister(*inst.getReceiver());
+    os_ << ");\n";
+  }
   void generateTryLoadGlobalPropertyInst(TryLoadGlobalPropertyInst &inst) {
     os_.indent(2);
     generateRegister(inst);
@@ -1345,7 +1403,7 @@ class InstrGen {
     os_ << "_sh_ljs_try_get_by_id_rjs(shr,&";
     generateRegister(*inst.getObject());
     os_ << ", ";
-    genStringConstIC(LS) << ");\n";
+    genStringConstReadIC(LS) << ");\n";
   }
   void generateLoadParentNoTrapsInst(LoadParentNoTrapsInst &inst) {
     os_.indent(2);
@@ -1557,6 +1615,23 @@ class InstrGen {
     }
     os_ << ";\n";
   }
+  void generateAllocTypedObjectInst(AllocTypedObjectInst &inst) {
+    assert(
+        inst.getKeyValuePairCount() == 0 &&
+        "AllocTypedObjectInst with properties should be lowered to HBCAllocObjectFromBufferInst");
+    os_.indent(2);
+    generateRegister(inst);
+    os_ << " = ";
+    // TODO: Utilize sizeHint.
+    if (llvh::isa<EmptySentinel>(inst.getParentObject())) {
+      os_ << "_sh_ljs_new_object(shr)";
+    } else {
+      os_ << "_sh_ljs_new_object_with_parent(shr, &";
+      generateValue(*inst.getParentObject());
+      os_ << ")";
+    }
+    os_ << ";\n";
+  }
   void generateCreateArgumentsLooseInst(CreateArgumentsLooseInst &inst) {
     hermes_fatal("CreateArgumentsLooseInst should have been lowered.");
   }
@@ -1662,7 +1737,7 @@ class InstrGen {
     os_ << ", ";
     generateRegisterPtr(*inst.getNewTarget());
     os_ << ", ";
-    os_ << buffIdx << ");\n";
+    os_ << buffIdx << ", NULL);\n";
   }
   void generateUnreachableInst(UnreachableInst &inst) {
     os_.indent(2);
@@ -1671,8 +1746,11 @@ class InstrGen {
   void generateCreateFunctionInst(CreateFunctionInst &inst) {
     os_.indent(2);
     generateRegister(inst);
-    os_ << " = _sh_ljs_create_closure" << "(shr, &";
-    generateRegister(*inst.getScope());
+    os_ << " = _sh_ljs_create_closure" << "(shr, ";
+    if (llvh::isa<EmptySentinel>(inst.getScope()))
+      os_ << "NULL";
+    else
+      generateRegisterPtr(*inst.getScope());
     os_ << ", ";
     moduleGen_.nativeFunctionTable.generateFunctionLabel(
         inst.getFunctionCode(), os_);
@@ -1684,8 +1762,11 @@ class InstrGen {
   void generateCreateGeneratorInst(CreateGeneratorInst &inst) {
     os_.indent(2);
     generateRegister(inst);
-    os_ << " = _sh_ljs_create_generator_object" << "(shr, &";
-    generateRegister(*inst.getScope());
+    os_ << " = _sh_ljs_create_generator_object" << "(shr, ";
+    if (llvh::isa<EmptySentinel>(inst.getScope()))
+      os_ << "NULL";
+    else
+      generateRegisterPtr(*inst.getScope());
     os_ << ", ";
     moduleGen_.nativeFunctionTable.generateFunctionLabel(
         inst.getFunctionCode(), os_);
@@ -1699,7 +1780,10 @@ class InstrGen {
     generateRegister(inst);
     bool isBaseClass = llvh::isa<EmptySentinel>(inst.getSuperClass());
     os_ << " = _sh_ljs_create_class(shr,";
-    generateRegisterPtr(*inst.getScope());
+    if (llvh::isa<EmptySentinel>(inst.getScope()))
+      os_ << "NULL";
+    else
+      generateRegisterPtr(*inst.getScope());
     os_ << ", ";
     moduleGen_.nativeFunctionTable.generateFunctionLabel(
         inst.getFunctionCode(), os_);
@@ -1922,9 +2006,6 @@ class InstrGen {
   void generateHBCCallNInst(HBCCallNInst &inst) {
     unimplemented(inst);
   }
-  void generateStartGeneratorInst(StartGeneratorInst &inst) {
-    unimplemented(inst);
-  }
   void generateResumeGeneratorInst(ResumeGeneratorInst &inst) {
     unimplemented(inst);
   }
@@ -1966,16 +2047,12 @@ class InstrGen {
     os_ << " = _sh_ljs_create_this(shr, &";
     generateRegister(*inst.getClosure());
     os_ << ", &";
-    if (llvh::isa<EmptySentinel>(inst.getNewTarget())) {
-      generateRegister(*inst.getClosure());
-    } else {
-      generateRegister(*inst.getNewTarget());
-    }
+    generateRegister(*inst.getNewTarget());
     os_ << ", ";
     Module *M = F_.getParent();
     auto *protoStr =
         M->getLiteralString(M->getContext().getIdentifier("prototype"));
-    genIC(protoStr);
+    genReadIC(protoStr);
     os_ << ");\n";
   }
   void generateHBCGetArgumentsPropByValLooseInst(
@@ -2093,6 +2170,8 @@ class InstrGen {
         return "_sh_ljs_is_symbol";
       case Type::Environment:
         hermes_fatal("cannot check for environment type");
+      case Type::PrivateName:
+        hermes_fatal("cannot check for PrivateName type");
       case Type::FunctionCode:
         hermes_fatal("cannot check for functionCode type");
       case Type::Object:
@@ -2398,7 +2477,7 @@ bool lowerModuleIR(Module *M, bool optimize) {
   // Lowering ExponentiationOperator and ThrowTypeError (in PeepholeLowering)
   // needs to run before LowerBuiltinCalls because it introduces calls to
   // HermesInternal.
-  PM.addPass(sh::createPeepholeLowering());
+  PM.addPass(sh::createPeepholeLowering(optimize));
   // LowerBuiltinCalls needs to run before the rest of the lowering.
   PM.addPass(createLowerBuiltinCalls());
   PM.addPass(new LowerNumericProperties());
@@ -2453,7 +2532,8 @@ void generateFunction(
     Function &F,
     hermes::sh::LineDirectiveEmitter &OS,
     ModuleGen &moduleGen,
-    uint32_t &nextCacheIdx,
+    uint32_t &nextWriteCacheIdx,
+    uint32_t &nextReadCacheIdx,
     BytecodeGenerationOptions options) {
   auto PO = hermes::postOrderAnalysis(&F);
 
@@ -2513,7 +2593,8 @@ void generateFunction(
   srcMgr.dumpCoords(OS, F.getSourceRange().Start);
   OS << '\n';
 
-  InstrGen instrGen(OS, RA, bbMap, F, moduleGen, nextCacheIdx, tryIDs);
+  InstrGen instrGen(
+      OS, RA, bbMap, F, moduleGen, nextWriteCacheIdx, nextReadCacheIdx, tryIDs);
 
   // Number of registers stored in the `locals` struct below.
   uint32_t localsSize = RA.getMaxRegisterUsage(sh::RegClass::LocalPtr);
@@ -2797,7 +2878,8 @@ void generateModule(
 
   // TODO: Share cache indices where the property name is the same and
   // -reuse-prop-cache is passed in.
-  uint32_t nextCacheIdx = 0;
+  uint32_t nextWriteCacheIdx = 0;
+  uint32_t nextReadCacheIdx = 0;
   ModuleGen moduleGen{M, options.optimizationEnabled};
 
   if (options.format == DumpBytecode || options.format == EmitBundle) {
@@ -2816,7 +2898,8 @@ void generateModule(
     OS << R"(
 static uint32_t unit_index;
 static inline SHSymbolID* get_symbols(SHUnit *);
-static inline SHPropertyCacheEntry* get_prop_cache(SHUnit *);
+static inline SHWritePropertyCacheEntry* get_write_prop_cache(SHUnit *);
+static inline SHReadPropertyCacheEntry* get_read_prop_cache(SHUnit *);
 static const SHSrcLoc s_source_locations[];
 static SHNativeFuncInfo s_function_info_table[];
 )";
@@ -2837,7 +2920,8 @@ static SHNativeFuncInfo s_function_info_table[];
   M->assignIndexToVariables();
 
   for (auto &F : *M)
-    generateFunction(F, OS, moduleGen, nextCacheIdx, options);
+    generateFunction(
+        F, OS, moduleGen, nextWriteCacheIdx, nextReadCacheIdx, options);
 
   if (options.format == DumpBytecode || options.format == EmitBundle) {
     moduleGen.literalBuffers.generate(OS);
@@ -2855,17 +2939,21 @@ static SHNativeFuncInfo s_function_info_table[];
     OS << "struct UnitData {\n"
        << "  SHUnit unit;\n"
        << "  SHSymbolID symbol_data[" << moduleGen.stringTable.size() << "];\n"
-       << "  SHPropertyCacheEntry prop_cache_data[" << nextCacheIdx << "];\n;"
-       << "  SHCompressedPointer object_literal_class_cache["
+       << "  SHWritePropertyCacheEntry write_prop_cache_data["
+       << nextWriteCacheIdx << "];\n;"
+       << "  SHReadPropertyCacheEntry read_prop_cache_data[" << nextReadCacheIdx
+       << "];\n;" << "  SHCompressedPointer object_literal_class_cache["
        << moduleGen.literalBuffers.objShapeTable.size() << "];\n};\n"
        << "SHUnit *CREATE_THIS_UNIT(void) {\n"
        << "  struct UnitData *unit_data = calloc(sizeof(struct UnitData), 1);\n"
        << "  *unit_data = (struct UnitData){.unit = {.index = &unit_index,"
        << ".num_symbols =" << moduleGen.stringTable.size()
-       << ", .num_prop_cache_entries = " << nextCacheIdx
+       << ", .num_write_prop_cache_entries = " << nextWriteCacheIdx
+       << ", .num_read_prop_cache_entries = " << nextReadCacheIdx
        << ", .ascii_pool = s_ascii_pool, .u16_pool = s_u16_pool,"
        << ".strings = s_strings, .symbols = unit_data->symbol_data,"
-       << ".prop_cache = unit_data->prop_cache_data,"
+       << ".write_prop_cache = unit_data->write_prop_cache_data,"
+       << ".read_prop_cache = unit_data->read_prop_cache_data,"
        << ".obj_key_buffer = s_obj_key_buffer, .obj_key_buffer_size = "
        << moduleGen.literalBuffers.objKeyBuffer.size() << ", "
        << ".literal_val_buffer = s_literal_val_buffer, .literal_val_buffer_size = "
@@ -2885,8 +2973,11 @@ SHSymbolID *get_symbols(SHUnit *unit) {
   return ((struct UnitData *)unit)->symbol_data;
 }
 
-SHPropertyCacheEntry *get_prop_cache(SHUnit *unit) {
-  return ((struct UnitData *)unit)->prop_cache_data;
+SHWritePropertyCacheEntry *get_write_prop_cache(SHUnit *unit) {
+  return ((struct UnitData *)unit)->write_prop_cache_data;
+}
+SHReadPropertyCacheEntry *get_read_prop_cache(SHUnit *unit) {
+  return ((struct UnitData *)unit)->read_prop_cache_data;
 }
 )";
     if (options.emitMain) {

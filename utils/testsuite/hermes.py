@@ -20,7 +20,7 @@ COMPILE_ARGS = [
     "-Xes6-block-scoping",
     "-Xenable-tdz",
 ]
-ES6_ARGS = ["-Xes6-promise", "-Xes6-proxy"]
+ES6_ARGS = ["-Xes6-proxy"]
 EXTRA_RUN_ARGS = ["-Xhermes-internal-test-methods"]
 USE_MICROTASK_FLAG = ["-Xmicrotask-queue"]
 
@@ -387,6 +387,7 @@ async def generate_ast(
         args.append("-Xparse-component-syntax")
         args.append("-parse-jsx")
         args.append("-Xinclude-empty-ast-nodes")
+        args.append("-Xparse-flow-match")
     elif "JSX" in test_file:
         args.append("--parse-jsx")
     args.append("-dump-transformed-ast" if transformed else "-dump-ast")

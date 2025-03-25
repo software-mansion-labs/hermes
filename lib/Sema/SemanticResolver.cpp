@@ -38,7 +38,7 @@ std::string stringForSHBuiltinError(
 SemanticResolver::SemanticResolver(
     Context &astContext,
     sema::SemContext &semCtx,
-    const DeclarationFileListTy &ambientDecls,
+    const DeclarationFileListTy *ambientDecls,
     DeclCollectorMapTy *saveDecls,
     bool compile,
     bool typed)
@@ -299,6 +299,12 @@ void SemanticResolver::visit(
   // call expression earlier. Any use that gets here is invalid.
   if (identifier->_name == kw_.identSHBuiltin) {
     sm_.error(identifier->getSourceRange(), "invalid use of $SHBuiltin");
+  }
+
+  // Identifiers belonging to a PrivateNameNode are validated in the
+  // PrivateNameNode visitor.
+  if (llvh::isa<PrivateNameNode>(parent)) {
+    return;
   }
 
   resolveIdentifier(identifier, false);
@@ -871,8 +877,10 @@ void SemanticResolver::visitClassAsExpr(ESTree::ClassLikeNode *node) {
   // Classes must be in strict mode.
   llvh::SaveAndRestore<bool> oldStrict{curFunctionInfo()->strict, true};
   ClassContext classCtx(*this, node);
+  // Declare a new scope where we will put private names.
+  ScopeRAII scope{*this, node};
+  collectDeclaredPrivateIdentifiers(node);
   if (ESTree::IdentifierNode *ident = getClassID(node)) {
-    ScopeRAII scope{*this, node};
     // If there is a name, declare it.
     if (validateDeclarationName(Decl::Kind::ClassExprName, ident)) {
       Decl *decl = semCtx_.newDeclInScope(
@@ -893,21 +901,36 @@ void SemanticResolver::visitClassAsExpr(ESTree::ClassLikeNode *node) {
 }
 
 void SemanticResolver::visit(PrivateNameNode *node) {
-  if (compile_)
-    sm_.error(node->getSourceRange(), "private properties are not supported");
+  resolvePrivateName(llvh::cast<IdentifierNode>(node->_id));
   visitESTreeChildren(*this, node);
 }
 
 void SemanticResolver::visit(ClassPrivatePropertyNode *node) {
-  if (compile_)
-    sm_.error(node->getSourceRange(), "private properties are not supported");
-  // Only visit the init expression, since it needs to be resolved.
+  // Visit the init expression, since it needs to be resolved.
   if (node->_value) {
-    sm_.error(
-        node->getSourceRange(), "property initialization is not supported yet");
-    if (0) {
-      // TODO: visit the properties in the context of a synthetic method.
-      visitESTreeNode(*this, node->_value, node);
+    // We visit the initializer expression in the context of a synthesized
+    // method that performs the initializations.
+    // Field initializers can always reference super.
+    llvh::SaveAndRestore<bool> oldCanRefSuper{canReferenceSuper_, true};
+    llvh::SaveAndRestore<bool> oldForbidAwait{forbidAwaitExpression_, true};
+    // ES14.0 15.7.1
+    // It is a Syntax Error if Initializer is present and ContainsArguments of
+    // Initializer is true.
+    llvh::SaveAndRestore<bool> oldForbidArguments{forbidArguments_, true};
+    FunctionContext funcCtx(
+        *this,
+        node->_static
+            ? curClassContext_->getOrCreateStaticElementsInitFunctionInfo()
+            : curClassContext_->getOrCreateInstanceElementsInitFunctionInfo());
+    visitESTreeNode(*this, node->_value, node);
+  } else if (!typed_) {
+    // Create the these initializers even if no value initializer is present, in
+    // untyped mode. Typed classes don't need these initializers since we know
+    // the exact shape and construct it up front.
+    if (node->_static) {
+      curClassContext_->getOrCreateStaticElementsInitFunctionInfo();
+    } else {
+      curClassContext_->getOrCreateInstanceElementsInitFunctionInfo();
     }
   }
 }
@@ -956,6 +979,8 @@ void SemanticResolver::visit(StaticBlockNode *node) {
   // It is a Syntax Error if ClassStaticBlockStatementList Contains await is
   // true.
   llvh::SaveAndRestore<bool> oldForbidAwait{forbidAwaitExpression_, true};
+  // Disallow arguments usage in static blocks.
+  llvh::SaveAndRestore<bool> oldForbidArguments{forbidArguments_, true};
   visitESTreeChildren(*this, node);
 }
 
@@ -1059,6 +1084,90 @@ void SemanticResolver::visit(ESTree::CallExpressionNode *node) {
     }
   }
 
+  visitESTreeChildren(*this, node);
+}
+
+void SemanticResolver::visit(
+    ESTree::MemberExpressionNode *node,
+    ESTree::Node *parent) {
+  if (auto *name = llvh::dyn_cast<PrivateNameNode>(node->_property)) {
+    // The following conditions are forbidden by the grammar but it's harder to
+    // enforce in the parser.
+    if (llvh::isa<SuperNode>(node->_object)) {
+      sm_.error(
+          node->getSourceRange(), "Cannot lookup private names on super.");
+    }
+    if (auto *op = llvh::dyn_cast<UnaryExpressionNode>(parent);
+        op && op->_operator == kw_.identDelete) {
+      sm_.error(node->getSourceRange(), "Cannot `delete` with a private name.");
+    }
+    if (!astContext_.getCodeGenerationSettings().test262) {
+      sema::Decl *decl =
+          resolvePrivateName(llvh::cast<IdentifierNode>(name->_id));
+      assert(decl && "private name node has missing decl");
+      if (auto *assign = llvh::dyn_cast<AssignmentExpressionNode>(parent);
+          assign && assign->_left == node) {
+        // Validate stores of a private name are using a name that is eligible
+        // for stores.
+        if (decl->kind == Decl::Kind::PrivateGetter) {
+          sm_.error(
+              parent->getSourceRange(),
+              "Cannot store to a private name that only defines a getter.");
+        } else if (decl->kind == Decl::Kind::PrivateMethod) {
+          sm_.error(
+              parent->getSourceRange(),
+              "Cannot store to a private name that defines a method.");
+        }
+      } else {
+        // Validate loads of a private name are using a name that is eligible
+        // for loads.
+        if (decl->kind == Decl::Kind::PrivateSetter) {
+          sm_.error(
+              node->getSourceRange(),
+              "Cannot load from a private name that only defines a setter.");
+        }
+      }
+    }
+  }
+  visitESTreeChildren(*this, node);
+}
+
+void SemanticResolver::visit(
+    ESTree::OptionalMemberExpressionNode *node,
+    ESTree::Node *parent) {
+  if (auto *name = llvh::dyn_cast<PrivateNameNode>(node->_property)) {
+    // `delete o?.#privateName` is not allowed.
+    if (auto *op = llvh::dyn_cast<UnaryExpressionNode>(parent);
+        op && op->_operator == kw_.identDelete) {
+      sm_.error(
+          parent->getSourceRange(), "Cannot `delete` with a private name.");
+    }
+    if (!astContext_.getCodeGenerationSettings().test262) {
+      sema::Decl *decl =
+          resolvePrivateName(llvh::cast<IdentifierNode>(name->_id));
+      assert(decl && "private name node has missing decl");
+      if (auto *assign = llvh::dyn_cast<AssignmentExpressionNode>(parent);
+          assign && assign->_left == node) {
+        // Validate stores of a private name.
+        if (decl->kind == Decl::Kind::PrivateGetter) {
+          sm_.error(
+              parent->getSourceRange(),
+              "Cannot store to a private name that only defines a getter.");
+        } else if (decl->kind == Decl::Kind::PrivateMethod) {
+          sm_.error(
+              parent->getSourceRange(),
+              "Cannot store to a private name that defines a method.");
+        }
+      } else {
+        // Validate loads of a private name.
+        if (decl->kind == Decl::Kind::PrivateSetter) {
+          sm_.error(
+              node->getSourceRange(),
+              "Cannot load from a private name that only defines a setter.");
+        }
+      }
+    }
+  }
   visitESTreeChildren(*this, node);
 }
 
@@ -1453,9 +1562,11 @@ void SemanticResolver::visitFunctionLikeInFunctionContext(
 
   FoundDirectives directives{};
 
-  // Arrow functions have their bodies turned into BlockStatement before visit.
-  auto *blockBody = llvh::cast<BlockStatementNode>(body);
-  directives = scanDirectives(blockBody->_body);
+  // Arrow functions have their bodies turned into BlockStatement before visit,
+  // but only in compile_ mode.
+  auto *blockBody = llvh::dyn_cast<BlockStatementNode>(body);
+  if (blockBody)
+    directives = scanDirectives(blockBody->_body);
 
   // Set the strictness if necessary.
   if (directives.useStrictNode)
@@ -1474,7 +1585,7 @@ void SemanticResolver::visitFunctionLikeInFunctionContext(
     validateDeclarationName(Decl::Kind::FunctionExprName, id);
   }
 
-  if (blockBody->isLazyFunctionBody) {
+  if (blockBody && blockBody->isLazyFunctionBody) {
     // Don't descend into lazy functions, don't create a scope.
     // But do record the surrounding scope in the FunctionInfo.
     assert(node->getSemInfo() && "semInfo must be set in first pass");
@@ -1762,6 +1873,46 @@ Decl *SemanticResolver::resolveIdentifier(
   return decl;
 }
 
+Decl *SemanticResolver::declarePrivateName(
+    IdentifierNode *identifier,
+    Decl::Kind kind,
+    bool isStatic) {
+  Identifier privateNameStr =
+      astContext_.getPrivateNameIdentifier(identifier->_name);
+  auto *decl = semCtx_.newDeclInScope(
+      privateNameStr.getUnderlyingPointer(),
+      kind,
+      curScope_,
+      isStatic ? Decl::Special::PrivateStatic : Decl::Special::NotSpecial);
+  auto res = bindingTable_.try_emplace(
+      privateNameStr.getUnderlyingPointer(), Binding{decl, identifier});
+  (void)res;
+  assert(res.second && "cannot re-declare a private name in the same scope.");
+  semCtx_.setBothDecl(identifier, decl);
+  return decl;
+}
+
+Decl *SemanticResolver::resolvePrivateName(IdentifierNode *identifier) {
+  if (sema::Decl *decl = semCtx_.getExpressionDecl(identifier))
+    return decl;
+
+  // If we find the binding, assign the associated declaration and return it.
+  Identifier privateNameStr =
+      astContext_.getPrivateNameIdentifier(identifier->_name);
+  if (Binding *binding =
+          bindingTable_.find(privateNameStr.getUnderlyingPointer())) {
+    semCtx_.setExpressionDecl(identifier, binding->decl);
+    return binding->decl;
+  }
+
+  // Failed to resolve.
+  sm_.error(
+      identifier->getSourceRange(),
+      Twine("the private name \"#") + identifier->_name->str() +
+          "\" was not declared in any enclosing class");
+  return nullptr;
+}
+
 Decl *SemanticResolver::checkIdentifierResolved(
     ESTree::IdentifierNode *identifier) {
   // If identifier already resolved or unresolvable,
@@ -1819,6 +1970,107 @@ void SemanticResolver::processPromotedFuncDecls(
     validateAndDeclareIdentifier(kind, ident);
     functionContext()->promotedFuncDecls.try_emplace(
         ident->_name, semCtx_.getDeclarationDecl(ident));
+  }
+}
+
+void SemanticResolver::collectDeclaredPrivateIdentifiers(
+    ESTree::ClassLikeNode *node) {
+  /// Information about a private accessor.
+  struct PrivateAccessorInfo {
+    /// The rest of the fields in the struct are only meaningful if isAccessor
+    /// is true. Fields & methods will have this as false.
+    bool isAccessor = false;
+    bool isStatic = false;
+    bool isGetter = false;
+    bool isSetter = false;
+    /// In the case of a pair of accessors defined with the same name, we should
+    /// reuse the same decl to define the declaration & expression decl of the
+    /// second accessor. This field stores that original decl for the second
+    /// accessor to find later.
+    Decl *originalNameDecl;
+  };
+
+  // Map a private name to accessor information.
+  llvh::DenseMap<const UniqueString *, PrivateAccessorInfo> privateDeclarations;
+
+  const char *defaultDupErrMsg = "Duplicate private identifier declaration.";
+  for (ESTree::Node &elm : getClassBody(node)->_body) {
+    // Declare and validate the class private names. Enforce the rules laid out
+    // in ES2024 15.7.1 Early Errors: It is a Syntax Error if declared private
+    // names contains any duplicate entries, unless the name is used once for a
+    // getter and once for a setter and in no other entries, and the getter and
+    // setter are either both static or both non-static.
+    if (auto *prop = llvh::dyn_cast<ESTree::ClassPrivatePropertyNode>(&elm)) {
+      auto *id = llvh::cast<IdentifierNode>(prop->_key);
+      // If we did not complete the insert, that means something already exists
+      // with this identifier. Fields are not allowed to be duplicated at all.
+      if (!privateDeclarations.try_emplace(id->_name, PrivateAccessorInfo{})
+               .second) {
+        sm_.error(id->getSourceRange(), defaultDupErrMsg);
+      } else {
+        declarePrivateName(id, Decl::Kind::PrivateField);
+      }
+      continue;
+    }
+    if (auto *method = llvh::dyn_cast<ESTree::MethodDefinitionNode>(&elm)) {
+      auto *privateName = llvh::dyn_cast<ESTree::PrivateNameNode>(method->_key);
+      if (!privateName)
+        continue;
+      auto id = llvh::cast<IdentifierNode>(privateName->_id);
+      UniqueString *methKind = method->_kind;
+      if (methKind == kw_.identMethod) {
+        if (!privateDeclarations.try_emplace(id->_name, PrivateAccessorInfo{})
+                 .second) {
+          sm_.error(id->getSourceRange(), defaultDupErrMsg);
+        } else {
+          declarePrivateName(id, Decl::Kind::PrivateMethod, method->_static);
+        }
+        continue;
+      }
+      assert(
+          (methKind == kw_.identSet || methKind == kw_.identGet) &&
+          "unrecognized method kind.");
+      bool isSetter = methKind == kw_.identSet;
+      PrivateAccessorInfo curInfo{
+          true, method->_static, !isSetter, isSetter, nullptr};
+      auto [iter, success] = privateDeclarations.insert({id->_name, curInfo});
+      // If we successfully inserted, there's no possibility for an error.
+      if (success) {
+        // Save the decl made here for reuse later in the case of a pair of
+        // accessors.
+        iter->second.originalNameDecl = declarePrivateName(
+            id,
+            isSetter ? Decl::Kind::PrivateSetter : Decl::Kind::PrivateGetter,
+            method->_static);
+        continue;
+      }
+      // There is already an private declaration of this identifier. The only
+      // way this can be legal is if it is also an accessor which is the
+      // complement accessor kind of what we are trying to define here, with the
+      // same static-ness. E.g., if we are trying to define a static getter,
+      // then the only accepted duplicate is a static setter.
+      auto &existingInfo = iter->second;
+      if ((!existingInfo.isAccessor) ||
+          (curInfo.isSetter && existingInfo.isSetter) ||
+          (curInfo.isGetter && existingInfo.isGetter)) {
+        sm_.error(id->getSourceRange(), defaultDupErrMsg);
+        continue;
+      }
+      if (curInfo.isStatic != existingInfo.isStatic) {
+        sm_.error(
+            id->getSourceRange(),
+            "static and non-static private accessor with the same name");
+        continue;
+      }
+      // We can only survive through one duplicate declaration on the same
+      // name. After this, we know this private name has both a setter
+      // and getter.
+      existingInfo.isGetter = true;
+      existingInfo.isSetter = true;
+      existingInfo.originalNameDecl->kind = Decl::Kind::PrivateGetterSetter;
+      // Make sure to bind this id node to the correct decl.
+      semCtx_.setBothDecl(id, existingInfo.originalNameDecl);
+    }
   }
 }
 
@@ -1957,9 +2209,11 @@ bool SemanticResolver::extractDeclaredIdentsFromID(
     return containsExpr;
   }
 
+#if HERMES_PARSE_FLOW
   if (auto *param = llvh::dyn_cast<ComponentParameterNode>(node)) {
-    return extractDeclaredIdentsFromID(param->_name, idents);
+    return extractDeclaredIdentsFromID(param->_local, idents);
   }
+#endif
 
   sm_.error(node->getSourceRange(), "invalid destructuring target");
   return false;
@@ -2167,6 +2421,24 @@ void SemanticResolver::validateAndDeclareIdentifier(
             ident->_name->str() + "'");
   }
 
+  // A promoted function involves two declarations: one for the global scope
+  // and one for the block scope.
+  // This statement handles the scenario where an identifier already
+  // has an associated declaration and focuses on creating the promoted
+  // declaration instead.
+  //  1. A block-scoped declaration is created and linked with the identifier.
+  //  2. The binding table is updated to associate the identifier name with
+  //    the correct declaration. It is necessary to use `put` instead
+  //    of `try_emplace` as there could be multiple identifiers with the same
+  //    name, requiring replacement of the previous binding.
+  if (semCtx_.getDeclarationDecl(ident) &&
+      functionContext()->promotedFuncDecls.count(ident->_name)) {
+    decl = semCtx_.newDeclInScope(ident->_name, kind, curScope_);
+    bindingTable_.put(ident->_name, Binding{decl, ident});
+    semCtx_.setPromotedDecl(ident, decl);
+    return;
+  }
+
   // Create new decl.
   if (!decl) {
     if (Decl::isKindGlobal(kind))
@@ -2365,6 +2637,9 @@ void SemanticResolver::processAmbientDecls() {
       globalScope_ &&
       "global scope must be created when declaring ambient globals");
 
+  if (!ambientDecls_)
+    return;
+
   /// This visitor structs collects declarations within a single closure without
   /// descending into child closures.
   struct DeclHoisting {
@@ -2419,7 +2694,7 @@ void SemanticResolver::processAmbientDecls() {
     }
   };
 
-  for (auto *programNode : ambientDecls_) {
+  for (auto *programNode : *ambientDecls_) {
     DeclHoisting DH;
     programNode->visit(DH);
     // Create variable declarations for each of the hoisted variables.

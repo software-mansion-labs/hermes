@@ -17,7 +17,7 @@
 #include "hermes/VM/Operations.h"
 #include "hermes/VM/PropertyAccessor.h"
 
-#include "llvh/ADT/SmallSet.h"
+#include "llvh/ADT/DenseSet.h"
 
 namespace hermes {
 namespace vm {
@@ -123,6 +123,9 @@ void JSObject::initializeLazyObject(
     Runtime &runtime,
     Handle<JSObject> lazyObject) {
   assert(lazyObject->flags_.lazyObject && "object must be lazy");
+  assert(
+      lazyObject->getClass(runtime) == *runtime.lazyObjectClass &&
+      "lazy object must have lazy class");
   // object is now assumed to be a regular object.
   lazyObject->flags_.lazyObject = 0;
 
@@ -396,7 +399,7 @@ CallResult<Handle<JSArray>> JSObject::getOwnPropertyKeys(
   size_t hostObjectSymbolCount = 0;
 
   // If current object is a host object we need to deduplicate its properties
-  llvh::SmallSet<SymbolID::RawType, 16> dedupSet;
+  llvh::SmallDenseSet<SymbolID::RawType, 16> dedupSet;
 
   // Output index.
   uint32_t index = 0;
@@ -1073,7 +1076,7 @@ CallResult<PseudoHandle<>> JSObject::getNamedWithReceiver_RJS(
     SymbolID name,
     Handle<> receiver,
     PropOpFlags opFlags,
-    PropertyCacheEntry *cacheEntry) {
+    ReadPropertyCacheEntry *cacheEntry) {
   NamedPropertyDescriptor desc;
   // Locate the descriptor. propObj contains the object which may be anywhere
   // along the prototype chain.
@@ -1091,10 +1094,36 @@ CallResult<PseudoHandle<>> JSObject::getNamedWithReceiver_RJS(
   if (LLVM_LIKELY(
           !desc.flags.accessor && !desc.flags.hostObject &&
           !desc.flags.proxyObject)) {
+    // The object must not be a proxy or HostObject, given that the descriptor
+    // does not indicate them.
+    assert(
+        !selfHandle->getFlags().proxyObject &&
+        !selfHandle->getFlags().hostObject);
+    // The object cannot be lazy after a lookup has occurred.
+    assert(!selfHandle->getFlags().lazyObject);
+
     // Populate the cache if requested.
     if (cacheEntry && !propObj->getClass(runtime)->isDictionaryNoCache()) {
       cacheEntry->clazz = propObj->getClassGCPtr();
       cacheEntry->slot = desc.slot;
+      if (selfHandle->getParent(runtime) == propObj &&
+          !selfHandle->getClass(runtime)->isDictionary()) {
+        // Property found on an object in the prototype chain.  The proto
+        // cache only works for the immediate proto of the the object,
+        // so don't cache for deeper prototypes.  We also don't cache
+        // if the object HC is a dictionary; those may gain properties without
+        // changing the HC value, which breaks the "negative caching" of
+        // the object HC.  Note that own-property caching can use
+        // a dictionary HC, as long as it hasn't had any properties deleted (or
+        // property flags changed) -- hence the isDictionaryNoCache test above.
+        // But for the negative caching we do here, we have to exempt all
+        // dictionaries, since adding a property could mean that that a
+        // subsequent execution should get the value from the object rather than
+        // the prototype.
+        cacheEntry->negMatchClazz = selfHandle->getClassGCPtr();
+      } else {
+        cacheEntry->negMatchClazz = CompressedPointer(nullptr);
+      }
     }
     return createPseudoHandle(
         getNamedSlotValueUnsafe(propObj, runtime, desc).unboxToHV(runtime));
@@ -3059,6 +3088,8 @@ namespace {
 /// All string keys are added as Symbols, to aid lookup in GetNextPName.
 /// All number keys are added as numbers.
 /// Only enumerable properties are included.
+/// Write the number of object properties for the obj to index 1 of \p arr
+/// (does not include proto properties).
 /// Returns the index after the last property added.
 CallResult<uint32_t> appendAllPropertyKeys(
     Handle<JSObject> obj,
@@ -3109,7 +3140,7 @@ CallResult<uint32_t> appendAllPropertyKeys(
       }
     }
   }; // end of lambda expression
-  while (lv.head.get()) {
+  for (bool first = true; lv.head.get(); first = false) {
     GCScope gcScope(runtime);
 
     // enumerableProps will contain all enumerable own properties from obj.
@@ -3124,6 +3155,13 @@ CallResult<uint32_t> appendAllPropertyKeys(
     }
     auto enumerableProps = *cr;
     auto marker = gcScope.createMarker();
+    if (first && beginIndex > 0) {
+      arr->set(
+          runtime,
+          1,
+          HermesValue::encodeTrustedNumberValue(
+              enumerableProps->getEndIndex()));
+    }
     for (unsigned i = 0, e = enumerableProps->getEndIndex(); i < e; ++i) {
       gcScope.flushToMarker(marker);
       lv.prop = enumerableProps->at(runtime, i).unboxToHV(runtime);
@@ -3200,8 +3238,11 @@ CallResult<uint32_t> appendAllPropertyKeys(
 }
 
 /// Adds the hidden classes of the prototype chain of obj to arr,
-/// starting with the prototype of obj at index 0, etc., and
+/// starting with the class of obj at index 2, etc., and
 /// terminates with null.
+/// Index 0 will contain the end index after this is complete.
+/// Index 1 will contain the number of properties pushed in obj.
+/// Index 2 will contain the class of obj.
 ///
 /// \param obj The object whose prototype chain should be output
 /// \param[out] arr The array where the classes will be appended. This
@@ -3211,15 +3252,31 @@ ExecutionStatus setProtoClasses(
     Handle<JSObject> obj,
     MutableHandle<BigStorage> &arr) {
   // Layout of a JSArray stored in the for-in cache:
-  // [class(proto(obj)), class(proto(proto(obj))), ..., null, prop0, prop1, ...]
+  // [numProtos, numObjProps, class(obj),
+  // class(proto(obj)), class(proto(proto(obj))), ..., null,
+  // prop0, prop1, ...]
+  // prop0 is at index numProtos.
+  // There are numObjProps properties on obj before the proto properties start.
 
   if (!obj->shouldCacheForIn(runtime)) {
     arr->clear(runtime);
     return ExecutionStatus::RETURNED;
   }
-  MutableHandle<JSObject> head(runtime, obj->getParent(runtime));
+  MutableHandle<JSObject> head(runtime, *obj);
   MutableHandle<> clazz(runtime);
   GCScopeMarkerRAII marker{runtime};
+  // Push entries 0 and 1 (we'll fill them in later).
+  clazz = HermesValue::encodeTrustedNumberValue(0);
+  if (LLVM_UNLIKELY(
+          BigStorage::push_back(arr, runtime, clazz) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  if (LLVM_UNLIKELY(
+          BigStorage::push_back(arr, runtime, clazz) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
   while (head.get()) {
     if (!head->shouldCacheForIn(runtime)) {
       arr->clear(runtime);
@@ -3241,11 +3298,22 @@ ExecutionStatus setProtoClasses(
     marker.flush();
   }
   clazz = HermesValue::encodeNullValue();
-  return BigStorage::push_back(arr, runtime, clazz);
+  if (LLVM_UNLIKELY(
+          BigStorage::push_back(arr, runtime, clazz) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+
+  arr->set(
+      runtime, 0, HermesValue::encodeTrustedNumberValue(arr->size(runtime)));
+  return ExecutionStatus::RETURNED;
 }
 
 /// Verifies that the classes of obj's prototype chain still matches those
 /// previously prefixed to arr by setProtoClasses.
+/// Assumes that the first elements are the count of HiddenClasses and the count
+/// of the object's own properties, and element 2 is is the object's own
+/// HiddenClass, so it doesn't check those.
 ///
 /// \param obj The object whose prototype chain should be verified
 /// \param arr Array previously populated by setProtoClasses
@@ -3256,7 +3324,8 @@ uint32_t matchesProtoClasses(
     Handle<JSObject> obj,
     Handle<BigStorage> arr) {
   MutableHandle<JSObject> head(runtime, obj->getParent(runtime));
-  uint32_t i = 0;
+  // Skip the counts and object's own class.
+  uint32_t i = 3;
   while (head.get()) {
     HermesValue protoCls = arr->at(runtime, i++);
     if (protoCls.isNull() || protoCls.getObject() != head->getClass(runtime) ||

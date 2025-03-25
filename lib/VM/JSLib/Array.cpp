@@ -363,7 +363,11 @@ static constexpr void setArrayFastPathObjectFlags(SHObjectFlags &res) {
 /// at 0 and ends at the length of the array.
 ///
 /// \param arr the array to check for fast pathing.
-/// \param arrayClass the default HiddenClass of an array.
+/// \param arrayClass Optional: the default HiddenClass of an array. If set,
+///   check that arr has this hidden class. This is a very fast (but
+///   restrictive) way to check whether ".length" has been changed to be
+///   read-only. If the caller doesn't care, or has already checked, this can be
+///   nullptr.
 /// \param len the length of \p arr.
 ///
 /// \return whether we can use the fast path for Array methods on \p arr.
@@ -407,8 +411,8 @@ static bool arrayFastPathCheck(
           0))
     return false;
 
-  // Fast path assumes that 'length' hasn't been reconfigured.
-  if (LLVM_UNLIKELY(arr->getClass(runtime) != arrayClass))
+  // Optionally check that 'length' hasn't been reconfigured.
+  if (arrayClass && arr->getClass(runtime) != arrayClass)
     return false;
 
   // Fast path assumes that the array storage goes from 0 to len.
@@ -1010,13 +1014,11 @@ arrayPrototypeJoin(void *, Runtime &runtime, NativeArgs args) {
   struct : Locals {
     PinnedValue<JSObject> O;
     PinnedValue<> lenProp;
-    PinnedValue<> separator;
     PinnedValue<StringPrimitive> sep;
     PinnedValue<JSArray> strings;
-    PinnedValue<> i;
     PinnedValue<> elem;
-    PinnedValue<StringPrimitive> S;
     PinnedValue<StringPrimitive> elementStr;
+    PinnedValue<JSArray::StorageType> inputStorage;
   } lv;
   LocalsRAII lraii{runtime, &lv};
 
@@ -1027,13 +1029,14 @@ arrayPrototypeJoin(void *, Runtime &runtime, NativeArgs args) {
   }
   lv.O = vmcast<JSObject>(*objRes);
 
-  auto emptyString = runtime.getPredefinedStringHandle(Predefined::emptyString);
-
-  if (runtime.insertVisitedObject(*lv.O))
-    return emptyString.getHermesValue();
+  if (runtime.insertVisitedObject(*lv.O)) {
+    return HermesValue::encodeStringValue(
+        runtime.getPredefinedString(Predefined::emptyString));
+  }
   auto cycleScope = llvh::make_scope_exit(
       [&runtime, &lv] { runtime.removeVisitedObject(*lv.O); });
 
+  // Obtain input length in len.
   auto propRes = JSObject::getNamed_RJS(
       lv.O, runtime, Predefined::getSymbolID(Predefined::length));
   if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
@@ -1046,71 +1049,145 @@ arrayPrototypeJoin(void *, Runtime &runtime, NativeArgs args) {
   }
   uint64_t len = *intRes;
 
-  // Use comma for separator if the first argument is undefined.
-  lv.separator = args.getArg(0).isUndefined()
-      ? HermesValue::encodeStringValue(
-            runtime.getPredefinedString(Predefined::comma))
-      : args.getArg(0);
-  auto strRes = toString_RJS(runtime, lv.separator);
-  if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
+  // Determine the separator. Use comma if the first argument is undefined.
+  if (args.getArg(0).isUndefined()) {
+    lv.sep = runtime.getPredefinedString(Predefined::comma);
+  } else {
+    // Otherwise convert it to string.
+    auto strRes = toString_RJS(runtime, args.getArgHandle(0));
+    if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
+    lv.sep = std::move(*strRes);
   }
-  lv.sep = std::move(*strRes);
 
+  // Exit early if the input is empty.
   if (len == 0) {
     return HermesValue::encodeStringValue(
         runtime.getPredefinedString(Predefined::emptyString));
   }
 
-  // Track the size of the resultant string. Use a 64-bit value to detect
-  // overflow.
+  // Track the size of the resultant string.
   SafeUInt32 size;
 
-  // Storage for the strings for each element.
+  // Storage for the strings for each element must fit in a JSArray.
   if (LLVM_UNLIKELY(len > JSArray::StorageType::maxElements())) {
     return runtime.raiseRangeError("Out of memory for array elements.");
   }
-  auto arrRes = JSArray::create(runtime, len, 0);
-  if (LLVM_UNLIKELY(arrRes == ExecutionStatus::EXCEPTION)) {
-    return ExecutionStatus::EXCEPTION;
+
+  // The first element not processed by the fast path.
+  uint32_t fastPathEnd = 0;
+
+  // 1. Fast Path: Process as many elements as possible quickly.
+  if (JSArray *arr = dyn_vmcast<JSArray>(lv.O.get());
+      arr && arrayFastPathCheck(runtime, arr, nullptr, (uint32_t)len)) {
+    // Accumulate the size of the strings in the array, stopping at the first
+    // element that is not a string, null, or undefined.
+    auto *storage = arr->getIndexedStorage(runtime);
+    // Save it for later.
+    lv.inputStorage = storage;
+
+    uint32_t i;
+    for (i = 0; i < len; ++i) {
+      SmallHermesValue elem = storage->at(runtime, i); // Direct access
+      uint32_t elemLen;
+      if (elem.isString())
+        elemLen = elem.getString(runtime)->getStringLength();
+      else if (elem.isNull() || elem.isUndefined() || elem.isEmpty())
+        elemLen = 0;
+      else
+        break;
+
+      if (i > 0)
+        size.add(lv.sep->getStringLength());
+      size.add(elemLen);
+    }
+    fastPathEnd = i;
+    // Check for string overflow to create the illusion that we are appending
+    // to the string. Also, prevent uint32_t overflow.
+    if (size.isOverflowed() ||
+        size.get() > StringPrimitive::MAX_STRING_LENGTH) {
+      return runtime.raiseRangeError("String is too long");
+    }
   }
-  lv.strings = std::move(*arrRes);
 
-  // Call toString on all the elements of the array.
-  // i can't be larger than UINT32_MAX as checked above.
-  for (uint32_t i = 0; i < len; ++i) {
-    // Add the size of the separator, except the first time.
-    if (i)
-      size.add(lv.sep->getStringLength());
+  // If there are remaining elements that weren't strings, or the input wasn't
+  // a dense array at all.
+  if (fastPathEnd < len) {
+    // Create temporary storage for the remaining input strings.  Element i of
+    // lv.strings will correspond to element i + fastPathEnd of the input array.
 
-    GCScope gcScope2(runtime);
-    lv.i = HermesValue::encodeTrustedNumberValue(i);
+    auto arrRes = JSArray::create(runtime, 0, 0);
+    if (LLVM_UNLIKELY(arrRes == ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
+    lv.strings = std::move(*arrRes);
+
+    // Resize the array.
     if (LLVM_UNLIKELY(
-            (propRes = JSObject::getComputed_RJS(lv.O, runtime, lv.i)) ==
+            JSArray::setStorageEndIndex(
+                lv.strings, runtime, len - fastPathEnd) ==
+            ExecutionStatus::EXCEPTION)) {
+      return ExecutionStatus::EXCEPTION;
+    }
+    if (LLVM_UNLIKELY(
+            JSArray::setLengthProperty(
+                lv.strings, runtime, len - fastPathEnd) ==
             ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
 
-    lv.elem = std::move(*propRes);
+    auto marker = gcScope.createMarker();
+    // Call toString on the remaining elements of the array.
+    // i can't be larger than UINT32_MAX as checked above.
+    for (uint32_t i = fastPathEnd; i < len;
+         gcScope.flushToMarker(marker), ++i) {
+      // Add the size of the separator, except the first time.
+      if (i)
+        size.add(lv.sep->getStringLength());
 
-    if (lv.elem->isUndefined() || lv.elem->isNull()) {
-      JSArray::setElementAt(lv.strings, runtime, i, emptyString);
-    } else {
-      // Otherwise, call toString_RJS() and push the result, incrementing
-      // size.
-      auto strRes = toString_RJS(runtime, lv.elem);
-      if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION)) {
-        return ExecutionStatus::EXCEPTION;
+      // Fetch the element into lv.elem.
+      if (lv.inputStorage.get()) {
+        // Fast-path: input array is dense.
+        lv.elem = lv.inputStorage->at(runtime, i).unboxToHV(runtime);
+      } else {
+        PinnedValue<> key = HermesValue::encodeTrustedNumberValue(i);
+        if (LLVM_UNLIKELY(
+                (propRes = JSObject::getComputed_RJS(lv.O, runtime, key)) ==
+                ExecutionStatus::EXCEPTION)) {
+          return ExecutionStatus::EXCEPTION;
+        }
+        lv.elem = std::move(*propRes);
       }
-      lv.S = std::move(*strRes);
-      size.add(lv.S->getStringLength());
-      JSArray::setElementAt(lv.strings, runtime, i, lv.S);
-    }
 
-    // Check for string overflow on every iteration to create the illusion
-    // that we are appending to the string. Also, prevent uint32_t overflow.
-    if (size.isOverflowed()) {
-      return runtime.raiseRangeError("String is too long");
+      // null and undefined are empty strings. The empty could come from
+      // reading the input storage directly; it acts as undefined.
+      if (lv.elem->isUndefined() || lv.elem->isNull() || lv.elem->isEmpty()) {
+        auto emptyString = SmallHermesValue::encodeStringValue(
+            runtime.getPredefinedString(Predefined::emptyString), runtime);
+        JSArray::unsafeSetExistingElementAt(
+            lv.strings.get(), runtime, i - fastPathEnd, emptyString);
+      } else {
+        // Otherwise, call toString_RJS() and save the result, incrementing
+        // size.
+        auto strRes = toString_RJS(runtime, lv.elem);
+        if (LLVM_UNLIKELY(strRes == ExecutionStatus::EXCEPTION))
+          return ExecutionStatus::EXCEPTION;
+
+        StringPrimitive *s = strRes.getValue().get();
+        size.add(s->getStringLength());
+
+        JSArray::unsafeSetExistingElementAt(
+            lv.strings.get(),
+            runtime,
+            i - fastPathEnd,
+            SmallHermesValue::encodeStringValue(s, runtime));
+      }
+
+      // Check for string overflow on every iteration to create the illusion
+      // that we are appending to the string. Also, prevent uint32_t overflow.
+      if (size.isOverflowed() ||
+          size.get() > StringPrimitive::MAX_STRING_LENGTH) {
+        return runtime.raiseRangeError("String is too long");
+      }
     }
   }
 
@@ -1119,13 +1196,26 @@ arrayPrototypeJoin(void *, Runtime &runtime, NativeArgs args) {
   if (builder == ExecutionStatus::EXCEPTION) {
     return ExecutionStatus::EXCEPTION;
   }
-  lv.elementStr = lv.strings->at(runtime, 0).getString(runtime);
-  builder->appendStringPrim(lv.elementStr);
-  for (size_t i = 1; i < len; ++i) {
-    builder->appendStringPrim(lv.sep);
-    lv.elementStr = lv.strings->at(runtime, i).getString(runtime);
+
+  for (uint32_t i = 0; i < fastPathEnd; ++i) {
+    if (i > 0)
+      builder->appendStringPrim(lv.sep);
+    SmallHermesValue elem = lv.inputStorage->at(runtime, i);
+    if (elem.isString()) {
+      lv.elementStr = lv.inputStorage->at(runtime, i).getString(runtime);
+      builder->appendStringPrim(lv.elementStr);
+    } else {
+      assert(elem.isNull() || elem.isUndefined() || elem.isEmpty());
+    }
+  }
+
+  for (uint32_t i = fastPathEnd; i < len; ++i) {
+    if (i > 0)
+      builder->appendStringPrim(lv.sep);
+    lv.elementStr = lv.strings->at(runtime, i - fastPathEnd).getString(runtime);
     builder->appendStringPrim(lv.elementStr);
   }
+
   return HermesValue::encodeStringValue(*builder->getStringPrimitive());
 }
 
@@ -4021,6 +4111,26 @@ arrayPrototypeReduceRight(void *, Runtime &runtime, NativeArgs args) {
 /// ES10.0 22.1.3.23.
 CallResult<HermesValue>
 arrayPrototypeReverse(void *, Runtime &runtime, NativeArgs args) {
+  // Fast path for a JSArray with a contiguous storage and no numeric props
+  // in the prototype.
+  if (auto *arr = llvh::dyn_vmcast<JSArray>(args.getThisArg())) {
+    NoAllocScope noAllocScope{runtime};
+    uint32_t len = JSArray::getLength(arr, runtime);
+    if (len <= 1)
+      return args.getThisArg();
+
+    if (arrayFastPathCheck(runtime, arr, nullptr, len)) {
+      auto *storage = arr->getIndexedStorage(runtime);
+      for (uint32_t l = 0, u = len - 1; l < u; ++l, --u) {
+        auto lowerValue = storage->at(runtime, l);
+        auto upperValue = storage->at(runtime, u);
+        storage->set(runtime, l, upperValue);
+        storage->set(runtime, u, lowerValue);
+      }
+      return args.getThisArg();
+    }
+  }
+
   struct : Locals {
     PinnedValue<JSObject> O;
     PinnedValue<> lenProp;
@@ -4241,13 +4351,9 @@ arrayPrototypeIncludes(void *, Runtime &runtime, NativeArgs args) {
 /// ES14.0 23.1.3.33
 CallResult<HermesValue>
 arrayPrototypeToReversed(void *, Runtime &runtime, NativeArgs args) {
-  GCScope gcScope{runtime};
   struct : Locals {
     PinnedValue<JSObject> O;
     PinnedValue<JSArray> A;
-    PinnedValue<> pk;
-    PinnedValue<> from;
-    PinnedValue<> fromValue;
   } lv;
   LocalsRAII lraii{runtime, &lv};
 
@@ -4272,57 +4378,76 @@ arrayPrototypeToReversed(void *, Runtime &runtime, NativeArgs args) {
   if (LLVM_UNLIKELY(len32 != len)) {
     return runtime.raiseRangeError("invalid array length");
   }
-  auto ARes = JSArray::create(runtime, len32, len32);
+  auto ARes = JSArray::create(runtime, 0, 0);
   if (LLVM_UNLIKELY(ARes == ExecutionStatus::EXCEPTION)) {
     return ExecutionStatus::EXCEPTION;
   }
   lv.A = std::move(*ARes);
+  if (LLVM_UNLIKELY(
+          JSArray::setStorageEndIndex(lv.A, runtime, len32) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
+  if (LLVM_UNLIKELY(
+          JSArray::setLengthProperty(lv.A, runtime, len32) ==
+          ExecutionStatus::EXCEPTION)) {
+    return ExecutionStatus::EXCEPTION;
+  }
 
-  // 4. Let k be 0.
-  double k = 0;
-  auto marker = gcScope.createMarker();
-  // 5. Repeat, while k < len,
-  while (k < len) {
-    gcScope.flushToMarker(marker);
+  // Fast Path: Input is a JSArray and arrayFastPathCheck passes.
+  if (jsArr && arrayFastPathCheck(runtime, jsArr.get(), nullptr, len32)) {
+    NoAllocScope noAllocScope{runtime};
+    auto *srcStorage = jsArr->getIndexedStorage(runtime);
+    auto *destStorage = lv.A->getIndexedStorage(runtime);
+    for (uint32_t to = 0, from = len32 - 1; to < len32; ++to, --from) {
+      SmallHermesValue fromValue = srcStorage->at(runtime, from);
+      destStorage->set(
+          runtime,
+          to,
+          LLVM_LIKELY(!fromValue.isEmpty())
+              ? fromValue
+              : SmallHermesValue::encodeUndefinedValue());
+    }
+    return lv.A.getHermesValue();
+  }
 
-    double from = len - k - 1;
-    // 5a. Let from be ! ToString(𝔽(len - k - 1)).
-    lv.from = HermesValue::encodeUntrustedNumberValue(from);
-
-    // 5b. Let Pk be ! ToString(𝔽(k)).
-    lv.pk = HermesValue::encodeTrustedNumberValue(k);
-
+  // Read a single element. This is a lambda to get around SmallHermesValue not
+  // having an assignment operator.
+  auto readElem =
+      [&runtime, &jsArr, &lv](uint32_t from) -> CallResult<SmallHermesValue> {
     // 5c. Let fromValue be ? Get(O, from).
     if (LLVM_LIKELY(jsArr)) {
-      const SmallHermesValue elm = jsArr->at(runtime, from);
+      auto elm = jsArr->at(runtime, from);
       // If the element is not empty, we can return it directly here.
       // Otherwise, we must proceed to the slow path.
-      if (!elm.isEmpty()) {
-        lv.fromValue = elm.unboxToHV(runtime);
-      }
-    }
-    // Slow path
-    else {
-      CallResult<PseudoHandle<>> propRes =
-          JSObject::getComputed_RJS(lv.O, runtime, lv.from);
-      if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
-        return ExecutionStatus::EXCEPTION;
-      }
-      lv.fromValue = std::move(*propRes);
+      if (!elm.isEmpty())
+        return elm;
     }
 
-    // 5d. Perform ! CreateDataPropertyOrThrow(A, Pk, fromValue).
-    if (LLVM_UNLIKELY(
-            JSObject::defineOwnComputedPrimitive(
-                lv.A,
-                runtime,
-                lv.pk,
-                DefinePropertyFlags::getDefaultNewPropertyFlags(),
-                lv.fromValue,
-                PropOpFlags().plusThrowOnError()) ==
-            ExecutionStatus::EXCEPTION)) {
+    // Slow path
+    GCScopeMarkerRAII marker{runtime};
+    // It is OK to have a PinnedValue here, because we are only storing a number
+    // in it.
+    PinnedValue fromV = HermesValue::encodeTrustedNumberValue(from);
+    CallResult<PseudoHandle<>> propRes =
+        JSObject::getComputed_RJS(lv.O, runtime, fromV);
+    if (LLVM_UNLIKELY(propRes == ExecutionStatus::EXCEPTION)) {
       return ExecutionStatus::EXCEPTION;
     }
+    return SmallHermesValue::encodeHermesValue(
+        propRes->getHermesValue(), runtime);
+  };
+
+  // 4. Let k be 0.
+  uint32_t k = 0;
+  // 5. Repeat, while k < len,
+  while (k < len) {
+    uint32_t from = len - k - 1;
+    auto elem = readElem(from);
+    if (LLVM_UNLIKELY(elem == ExecutionStatus::EXCEPTION))
+      return ExecutionStatus::EXCEPTION;
+
+    JSArray::unsafeSetExistingElementAt(lv.A.get(), runtime, k, *elem);
 
     // 5e. Set k to k + 1.
     ++k;

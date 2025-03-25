@@ -43,9 +43,9 @@ class SemanticResolver
   /// Keywords we will be checking for.
   hermes::sema::Keywords kw_;
 
-  /// A list of parsed files containing global ambient declarations that should
-  /// be inserted in the global scope.
-  const DeclarationFileListTy &ambientDecls_;
+  /// If not null, a list of parsed files containing global ambient declarations
+  /// that should be inserted in the global scope.
+  const DeclarationFileListTy *ambientDecls_;
 
   /// A set of names that are restricted in the global scope.
   /// https://262.ecma-international.org/14.0/#sec-hasrestrictedglobalproperty
@@ -115,7 +115,7 @@ class SemanticResolver
   explicit SemanticResolver(
       Context &astContext,
       sema::SemContext &semCtx,
-      const DeclarationFileListTy &ambientDecls,
+      const DeclarationFileListTy *ambientDecls,
       DeclCollectorMapTy *saveDecls,
       bool compile,
       bool typed = false);
@@ -123,7 +123,7 @@ class SemanticResolver
   explicit SemanticResolver(
       Context &astContext,
       sema::SemContext &semCtx,
-      const DeclarationFileListTy &ambientDecls,
+      const DeclarationFileListTy *ambientDecls,
       bool compile)
       : SemanticResolver(astContext, semCtx, ambientDecls, nullptr, compile) {}
 
@@ -190,6 +190,11 @@ class SemanticResolver
     visitESTreeChildren(*this, node);
   }
 
+  /// A private identifier is declared via a field, method, or accessor
+  /// definition. This will report errors in any illegally duplicated private
+  /// identifiers. Also add the private names to the binding table and associate
+  /// `Decl`s with the corresponding private name IdentifierNodes.
+  void collectDeclaredPrivateIdentifiers(ESTree::ClassLikeNode *node);
   void visit(ESTree::ProgramNode *node);
 
   void visit(ESTree::FunctionDeclarationNode *funcDecl, ESTree::Node *parent);
@@ -254,6 +259,9 @@ class SemanticResolver
   void visit(ESTree::SuperNode *node, ESTree::Node *parent);
 
   void visit(ESTree::CallExpressionNode *node);
+
+  void visit(ESTree::MemberExpressionNode *node, ESTree::Node *parent);
+  void visit(ESTree::OptionalMemberExpressionNode *node, ESTree::Node *parent);
 
   void visit(ESTree::SpreadElementNode *node, ESTree::Node *parent);
 
@@ -382,6 +390,24 @@ class SemanticResolver
   /// Assigns the associated declaration if it exists.
   /// \return the declaration, `nullptr` if unresolvable or failed to resolve.
   Decl *checkIdentifierResolved(ESTree::IdentifierNode *identifier);
+
+  /// Create a new declaration of a private name in the current scope.
+  /// \pre An IdentifierNode which has the same _name field has not been
+  /// declared in this same LexicalScope.
+  /// \param identifier the AST node containing the name
+  /// \param kind the kind of decl to be created.
+  /// \param isStatic is only valid for methods / accessors.
+  /// \return the newly created decl.
+  Decl *declarePrivateName(
+      ESTree::IdentifierNode *identifier,
+      Decl::Kind kind,
+      bool isStatic = false);
+
+  /// Resolve an identifier for a private name to a declaration and record the
+  /// resolution. Emit an error for undeclared private names.
+  /// \return null when no private name declaration could be found for \p
+  /// identifier; at which point an error has been raised.
+  Decl *resolvePrivateName(ESTree::IdentifierNode *identifier);
 
   /// Declare all declarations optionally associated with \p scopeNode
   /// by the DeclCollector in the current scope.

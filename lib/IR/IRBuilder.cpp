@@ -366,16 +366,16 @@ CreateClassInst *IRBuilder::createCreateClassInst(
 }
 
 CreateFunctionInst *IRBuilder::createCreateFunctionInst(
-    Instruction *scope,
+    BaseScopeInst *scope,
     Function *code) {
-  auto CFI = new CreateFunctionInst(scope, code);
+  auto CFI = new CreateFunctionInst(scope, scope->getVariableScope(), code);
   insert(CFI);
   return CFI;
 }
 
 GetParentScopeInst *IRBuilder::createGetParentScopeInst(
     VariableScope *scope,
-    JSDynamicParam *parentScopeParam) {
+    JSSpecialParam *parentScopeParam) {
   auto GPS = new GetParentScopeInst(scope, parentScopeParam);
   insert(GPS);
   return GPS;
@@ -409,8 +409,9 @@ LIRResolveScopeInst *IRBuilder::createLIRResolveScopeInst(
 
 GetClosureScopeInst *IRBuilder::createGetClosureScopeInst(
     VariableScope *scope,
+    Function *F,
     Value *closure) {
-  auto *GCSI = new GetClosureScopeInst(scope, closure);
+  auto *GCSI = new GetClosureScopeInst(scope, F, closure);
   insert(GCSI);
   return GCSI;
 }
@@ -516,6 +517,15 @@ LoadPropertyInst *IRBuilder::createLoadPropertyInst(
   return LPI;
 }
 
+LoadPropertyWithReceiverInst *IRBuilder::createLoadPropertyWithReceiverInst(
+    Value *object,
+    Value *property,
+    Value *receiver) {
+  auto LPI = new LoadPropertyWithReceiverInst(object, property, receiver);
+  insert(LPI);
+  return LPI;
+}
+
 TryLoadGlobalPropertyInst *IRBuilder::createTryLoadGlobalPropertyInst(
     LiteralString *property) {
   auto *inst = new TryLoadGlobalPropertyInst(getGlobalObject(), property);
@@ -549,6 +559,22 @@ DeletePropertyStrictInst *IRBuilder::createDeletePropertyStrictInst(
   auto DPI = new DeletePropertyStrictInst(object, property);
   insert(DPI);
   return DPI;
+}
+
+StorePropertyWithReceiverInst *IRBuilder::createStorePropertyWithReceiverInst(
+    Value *storedValue,
+    Value *object,
+    Value *property,
+    Value *receiver,
+    StoreStrict isStrict) {
+  auto SPI = new StorePropertyWithReceiverInst(
+      storedValue,
+      object,
+      property,
+      receiver,
+      getLiteralBool(isStrict == StoreStrict::Yes));
+  insert(SPI);
+  return SPI;
 }
 
 StorePropertyInst *IRBuilder::createStorePropertyInst(
@@ -625,13 +651,9 @@ DefineOwnPropertyInst *IRBuilder::createDefineOwnPropertyInst(
 DefineNewOwnPropertyInst *IRBuilder::createDefineNewOwnPropertyInst(
     Value *storedValue,
     Value *object,
-    Literal *property,
-    PropEnumerable isEnumerable) {
+    Literal *property) {
   auto *inst = new DefineNewOwnPropertyInst(
-      storedValue,
-      object,
-      property,
-      getLiteralBool(isEnumerable == PropEnumerable::Yes));
+      storedValue, object, property, getLiteralBool(true));
   insert(inst);
   return inst;
 }
@@ -925,15 +947,9 @@ SaveAndYieldInst *IRBuilder::createSaveAndYieldInst(
 }
 
 CreateGeneratorInst *IRBuilder::createCreateGeneratorInst(
-    Instruction *scope,
+    BaseScopeInst *scope,
     NormalFunction *innerFn) {
-  auto *I = new CreateGeneratorInst(scope, innerFn);
-  insert(I);
-  return I;
-}
-
-StartGeneratorInst *IRBuilder::createStartGeneratorInst() {
-  auto *I = new StartGeneratorInst();
+  auto *I = new CreateGeneratorInst(scope, scope->getVariableScope(), innerFn);
   insert(I);
   return I;
 }
@@ -949,7 +965,7 @@ HBCResolveParentEnvironmentInst *
 IRBuilder::createHBCResolveParentEnvironmentInst(
     VariableScope *scope,
     LiteralNumber *numLevels,
-    JSDynamicParam *parentScopeParam) {
+    JSSpecialParam *parentScopeParam) {
   auto *inst =
       new HBCResolveParentEnvironmentInst(scope, numLevels, parentScopeParam);
   insert(inst);
@@ -999,7 +1015,7 @@ LoadParamInst *IRBuilder::createLoadParamInst(JSDynamicParam *param) {
 HBCCreateFunctionEnvironmentInst *
 IRBuilder::createHBCCreateFunctionEnvironmentInst(
     VariableScope *scope,
-    JSDynamicParam *parentScopeParam) {
+    JSSpecialParam *parentScopeParam) {
   auto *inst = new HBCCreateFunctionEnvironmentInst(scope, parentScopeParam);
   insert(inst);
   return inst;
@@ -1103,6 +1119,15 @@ AllocObjectLiteralInst *IRBuilder::createAllocObjectLiteralInst(
     const AllocObjectLiteralInst::ObjectPropertyMap &propMap,
     Value *parentObject) {
   auto *inst = new AllocObjectLiteralInst(
+      parentObject ? parentObject : getEmptySentinel(), propMap);
+  insert(inst);
+  return inst;
+}
+
+AllocTypedObjectInst *IRBuilder::createAllocTypedObjectInst(
+    const AllocTypedObjectInst::ObjectPropertyMap &propMap,
+    Value *parentObject) {
+  auto *inst = new AllocTypedObjectInst(
       parentObject ? parentObject : getEmptySentinel(), propMap);
   insert(inst);
   return inst;

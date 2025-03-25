@@ -11,17 +11,14 @@ function b(d=([[[[{z:[{}]}]]]]=arguments)) {}
 
 // Auto-generated content below. Please do not modify manually.
 
-// CHKRA:scope %VS0 []
-
 // CHKRA:function global(): undefined
 // CHKRA-NEXT:%BB0:
 // CHKRA-NEXT:                 DeclareGlobalVarInst "b": string
-// CHKRA-NEXT:  {r0}      %1 = CreateScopeInst (:environment) %VS0: any, empty: any
-// CHKRA-NEXT:  {r1}      %2 = CreateFunctionInst (:object) {r0} %1: environment, %b(): functionCode
-// CHKRA-NEXT:  {r0}      %3 = HBCGetGlobalObjectInst (:object)
-// CHKRA-NEXT:                 StorePropertyLooseInst {r1} %2: object, {r0} %3: object, "b": string
-// CHKRA-NEXT:  {np0}     %5 = HBCLoadConstInst (:undefined) undefined: undefined
-// CHKRA-NEXT:                 ReturnInst {np0} %5: undefined
+// CHKRA-NEXT:  {r1}      %1 = HBCGetGlobalObjectInst (:object)
+// CHKRA-NEXT:  {np0}     %2 = HBCLoadConstInst (:undefined) undefined: undefined
+// CHKRA-NEXT:  {r0}      %3 = CreateFunctionInst (:object) {np0} %2: undefined, empty: any, %b(): functionCode
+// CHKRA-NEXT:                 StorePropertyLooseInst {r0} %3: object, {r1} %1: object, "b": string
+// CHKRA-NEXT:                 ReturnInst {np0} %2: undefined
 // CHKRA-NEXT:function_end
 
 // CHKRA:function b(d: any): undefined

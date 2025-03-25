@@ -50,6 +50,10 @@ void hermes::runFullOptimizationPasses(Module &M) {
   // Add the optimization passes.
 
   PM.addLowerGeneratorFunction();
+  // CacheNewObject benefits from running early because it needs new.target,
+  // which may be eliminated by later passes. It also currently only works on
+  // the `this` parameter, so it should run before inlining.
+  PM.addCacheNewObject();
   // We need to fold constant strings before staticrequire.
   PM.addInstSimplify();
   PM.addResolveStaticRequire();
@@ -87,6 +91,7 @@ void hermes::runFullOptimizationPasses(Module &M) {
   addMem2Reg();
   PM.addScopeElimination();
   PM.addFunctionAnalysis();
+  PM.addScopeHoisting();
   PM.addObjectStackPromotion();
 
   // Run type inference before CSE so that we can better reason about binopt.
@@ -105,11 +110,6 @@ void hermes::runFullOptimizationPasses(Module &M) {
 
   PM.addTypeInference();
 
-  PM.addCacheNewObject();
-
-  // Move StartGenerator instructions to the start of functions.
-  PM.addHoistStartGenerator();
-
   // Run the optimizations.
   PM.run(&M);
 }
@@ -122,9 +122,6 @@ void hermes::runDebugOptimizationPasses(Module &M) {
 
   PM.addInstSimplify();
   PM.addResolveStaticRequire();
-
-  // Move StartGenerator instructions to the start of functions.
-  PM.addHoistStartGenerator();
 
   // Run the optimizations.
   PM.run(&M);

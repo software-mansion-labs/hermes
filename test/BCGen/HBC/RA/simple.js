@@ -19,17 +19,14 @@ function main(x, y, z) {
 
 // Auto-generated content below. Please do not modify manually.
 
-// CHECK:scope %VS0 []
-
 // CHECK:function global(): undefined
 // CHECK-NEXT:%BB0:
 // CHECK-NEXT:                 DeclareGlobalVarInst "main": string
-// CHECK-NEXT:  {r0}      %1 = CreateScopeInst (:environment) %VS0: any, empty: any
-// CHECK-NEXT:  {r1}      %2 = CreateFunctionInst (:object) {r0} %1: environment, %main(): functionCode
-// CHECK-NEXT:  {r0}      %3 = HBCGetGlobalObjectInst (:object)
-// CHECK-NEXT:                 StorePropertyLooseInst {r1} %2: object, {r0} %3: object, "main": string
-// CHECK-NEXT:  {np0}     %5 = HBCLoadConstInst (:undefined) undefined: undefined
-// CHECK-NEXT:                 ReturnInst {np0} %5: undefined
+// CHECK-NEXT:  {r1}      %1 = HBCGetGlobalObjectInst (:object)
+// CHECK-NEXT:  {np0}     %2 = HBCLoadConstInst (:undefined) undefined: undefined
+// CHECK-NEXT:  {r0}      %3 = CreateFunctionInst (:object) {np0} %2: undefined, empty: any, %main(): functionCode
+// CHECK-NEXT:                 StorePropertyLooseInst {r0} %3: object, {r1} %1: object, "main": string
+// CHECK-NEXT:                 ReturnInst {np0} %2: undefined
 // CHECK-NEXT:function_end
 
 // CHECK:function main(x: any, y: any, z: any): number

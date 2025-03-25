@@ -216,6 +216,7 @@ Value *ESTreeIRGen::_genExpressionImpl(
         flowTypeToIRType(flowContext_.getNodeTypeOrAny(ICK)));
   }
 
+#if HERMES_PARSE_FLOW
   if (auto *TC = llvh::dyn_cast<ESTree::TypeCastExpressionNode>(expr)) {
     return Builder.createCheckedTypeCastInst(
         genExpression(TC->_expression, nameHint),
@@ -226,6 +227,7 @@ Value *ESTreeIRGen::_genExpressionImpl(
         genExpression(TC->_expression, nameHint),
         flowTypeToIRType(flowContext_.getNodeTypeOrAny(TC)));
   }
+#endif
 
   Builder.getModule()->getContext().getSourceErrorManager().error(
       expr->getSourceRange(), Twine("Invalid expression encountered"));
@@ -916,8 +918,8 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::genMemberExpression(
     Value *homeObjectVal = Builder.createLoadFrameInst(RSI, homeObjectVar);
     // We know that home objects are always ordinary objects.
     Value *superObj = Builder.createLoadParentNoTrapsInst(homeObjectVal);
-    Value *propVal = Builder.createLoadPropertyInst(
-        superObj, genMemberExpressionProperty(mem));
+    Value *propVal = Builder.createLoadPropertyWithReceiverInst(
+        superObj, genMemberExpressionProperty(mem), thisValue);
     return MemberExpressionResult{propVal, nullptr, thisValue};
   }
 
@@ -947,14 +949,27 @@ ESTreeIRGen::MemberExpressionResult ESTreeIRGen::emitMemberLoad(
       auto optFieldLookup = classType->findField(propName);
       if (optFieldLookup) {
         size_t fieldIndex = optFieldLookup->getField()->layoutSlotIR;
-        return MemberExpressionResult{
-            Builder.createPrLoadInst(
-                baseValue,
-                fieldIndex,
-                Builder.getLiteralString(propName),
-                flowTypeToIRType(optFieldLookup->getField()->type)),
-            nullptr,
-            baseValue};
+        Type irType = flowTypeToIRType(optFieldLookup->getField()->type);
+        Instruction *inst;
+        if (irType.canBePrimitive()) {
+          // If the type can be a primitive, it will have a default value that
+          // doesn't need IDZ.
+          inst = Builder.createPrLoadInst(
+              baseValue,
+              fieldIndex,
+              Builder.getLiteralString(propName),
+              irType);
+        } else {
+          // IDZ needed for object types.
+          inst = Builder.createThrowIfInst(
+              Builder.createPrLoadInst(
+                  baseValue,
+                  fieldIndex,
+                  Builder.getLiteralString(propName),
+                  Type::unionTy(irType, Type::createUninit())),
+              Type::createUninit());
+        }
+        return MemberExpressionResult{inst, nullptr, baseValue};
       }
       // Failed to find a class field, check the home object for methods.
       auto optMethodLookup =
@@ -1107,7 +1122,21 @@ void ESTreeIRGen::emitMemberStore(
     ESTree::MemberExpressionNode *mem,
     Value *storedValue,
     Value *baseValue,
-    Value *propValue) {
+    Value *propValue,
+    Value *thisValue) {
+  // If \p thisValue is set, this is a store to `super`, so we must set up the
+  // receiver correctly.
+  if (thisValue) {
+    Builder.createStorePropertyWithReceiverInst(
+        storedValue,
+        baseValue,
+        propValue,
+        thisValue,
+        curFunction()->function->isStrictMode() ? IRBuilder::StoreStrict::Yes
+                                                : IRBuilder::StoreStrict::No);
+    return;
+  }
+
   if (auto *classType = llvh::dyn_cast<flow::ClassType>(
           flowContext_.getNodeTypeOrAny(mem->_object)->info)) {
     if (!mem->_computed) {
@@ -1565,10 +1594,7 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
               IRBuilder::PropEnumerable::Yes);
         } else {
           Builder.createDefineNewOwnPropertyInst(
-              Builder.getLiteralNull(),
-              Obj,
-              Key,
-              IRBuilder::PropEnumerable::Yes);
+              Builder.getLiteralNull(), Obj, Key);
         }
         propValue->state = PropertyValue::Placeholder;
       }
@@ -1629,8 +1655,7 @@ Value *ESTreeIRGen::genObjectExpr(ESTree::ObjectExpressionNode *Expr) {
         Builder.createDefineOwnPropertyInst(
             value, Obj, Key, IRBuilder::PropEnumerable::Yes);
       } else {
-        Builder.createDefineNewOwnPropertyInst(
-            value, Obj, Key, IRBuilder::PropEnumerable::Yes);
+        Builder.createDefineNewOwnPropertyInst(value, Obj, Key);
       }
       propValue->state = PropertyValue::IRGenerated;
     } else {
@@ -2575,8 +2600,7 @@ Value *ESTreeIRGen::genNewExpr(ESTree::NewExpressionNode *N) {
     for (auto &arg : N->_arguments) {
       args.push_back(genExpression(&arg));
     }
-    auto *thisArg =
-        Builder.createCreateThisInst(callee, Builder.getEmptySentinel());
+    auto *thisArg = Builder.createCreateThisInst(callee, callee);
     auto *res = Builder.createCallInst(callee, callee, thisArg, args);
     return Builder.createGetConstructedObjectInst(thisArg, res);
   }

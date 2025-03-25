@@ -76,6 +76,18 @@ class Decl {
     /// but not outside it.
     ClassExprName,
 
+    // ==== Private name declarations ===
+    /// This name defines a field.
+    PrivateField,
+    /// This name defines a method.
+    PrivateMethod,
+    /// This name defines only a getter.
+    PrivateGetter,
+    /// This name defines only a setter.
+    PrivateSetter,
+    /// This name defines both a getter and setter.
+    PrivateGetterSetter,
+
     // ==== Var-like declarations ===
 
     /// "var" in function scope.
@@ -88,13 +100,15 @@ class Decl {
     UndeclaredGlobalProperty,
   };
 
-  /// Certain identifiers must be treated differently by later parts
-  /// of the program.
-  /// Indicate if this identifier is specially treated "arguments" or "eval".
+  /// Certain identifiers must be treated differently by later parts of the
+  /// program, e.g. this identifier is specially treated "arguments" or "eval".
+  /// Can also store information on a private name decl static level.
   enum class Special : uint8_t {
     NotSpecial,
     Arguments,
     Eval,
+    /// Can only be set for a private method or accessor.
+    PrivateStatic,
   };
 
   /// \return true if this declaration kind obeys the TDZ.
@@ -124,6 +138,11 @@ class Decl {
   static bool isKindNotReassignable(Kind kind) {
     return kind == Kind::Const || kind == Kind::ClassExprName ||
         kind == Kind::Import;
+  }
+
+  /// \return true if this declaration kind is a private name.
+  static bool isKindPrivateName(Kind kind) {
+    return kind >= Kind::PrivateField && kind <= Kind::PrivateGetterSetter;
   }
 
   /// Identifier that is declared.
@@ -482,6 +501,26 @@ class SemContext {
   /// Set the "declaration decl" of the specified identifier node.
   void setDeclarationDecl(ESTree::IdentifierNode *node, Decl *decl);
 
+  /// Set a promoted "declaration decl" for the specified identifier node.
+  void setPromotedDecl(ESTree::IdentifierNode *node, Decl *decl) {
+    promotedFunctionDecls_[node] = decl;
+  }
+
+  /// \return a global "declaration decl" associated with a promoted function
+  /// identifier if one exists, else nullptr.
+  Decl *getPromotedDecl(ESTree::IdentifierNode *node) {
+    if (auto it = promotedFunctionDecls_.find(node);
+        it != promotedFunctionDecls_.end()) {
+      return it->second;
+    }
+    return nullptr;
+  }
+
+  /// Clears all promoted declarations.
+  void clearPromotedDecls() {
+    promotedFunctionDecls_.clear();
+  }
+
   /// Set the "declaration decl" and the "expression decl" of the identifier
   /// node to the same value.
   void setBothDecl(ESTree::IdentifierNode *node, Decl *decl) {
@@ -537,6 +576,13 @@ class SemContext {
   /// "expression decl" are both set and are not the same value.
   llvh::DenseMap<ESTree::IdentifierNode *, Decl *>
       sideIdentifierDeclarationDecl_{};
+
+  /// This side table is used to associate a "declaration decl" with an
+  /// ESTree::IdentifierNode in scenarios where a scoped function
+  /// is promoted to the global scope.
+  /// In promotedFunctionDecls_ we store the scoped declaration, while in
+  /// sideIdentifierDeclarationDecl_ the global-like declaration
+  llvh::DenseMap<ESTree::IdentifierNode *, Decl *> promotedFunctionDecls_{};
 };
 
 class SemContextDumper {

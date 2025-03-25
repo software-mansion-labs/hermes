@@ -896,24 +896,12 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
     return runtimeModuleList_;
   }
 
-  bool hasES6Promise() const {
-    return hasES6Promise_;
-  }
-
   bool hasES6Proxy() const {
     return hasES6Proxy_;
   }
 
-  bool hasES6Class() const {
-#ifndef HERMES_FACEBOOK_BUILD
-    return hasES6Class_;
-#else
-    return false;
-#endif
-  }
-
   bool hasES6BlockScoping() const {
-    return hasES6Class_;
+    return hasES6BlockScoping_;
   }
 
   bool hasIntl() const {
@@ -979,6 +967,8 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
 #elif defined(_MSC_VER) && defined(HERMES_SLOW_DEBUG)
       // On windows in dbg mode builds, stack frames are bigger, and a depth
       // limit of 384 results in a C++ stack overflow in testing.
+      128
+#elif defined(_MSC_VER) && defined(__clang__) && !defined(NDEBUG)
       128
 #elif defined(_MSC_VER) && !NDEBUG
       192
@@ -1151,14 +1141,8 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   /// All state related to JIT compilation.
   JITContext jitContext_;
 
-  /// Set to true if we should enable ES6 Promise.
-  const bool hasES6Promise_;
-
   /// Set to true if we should enable ES6 Proxy.
   const bool hasES6Proxy_;
-
-  /// Set to true if we should enable ES6 Class
-  const bool hasES6Class_;
 
   /// Set to true if we should enable ES6 block scoping.
   const bool hasES6BlockScoping_;
@@ -1275,8 +1259,9 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
       InternalProperty::NumAnonymousInternalProperties + 1>
       rootClazzes_;
 
-  /// Cache for property lookups in non-JS code.
-  PropertyCacheEntry fixedPropCache_[(size_t)PropCacheID::_COUNT];
+  /// Caches for property lookups in non-JS code.
+  WritePropertyCacheEntry fixedWritePropCache_[(size_t)PropCacheID::_COUNT];
+  ReadPropertyCacheEntry fixedReadPropCache_[(size_t)PropCacheID::_COUNT];
 
   /// StringPrimitive representation of the first 256 characters.
   /// These are allocated as "long-lived" objects, so they don't need
@@ -1356,6 +1341,10 @@ class Runtime : public RuntimeBase, public HandleRootOwner {
   }
 
   Debugger debugger_{*this};
+
+  /// A copy of the internal bytecode made so that we can set breakpoints in it
+  /// to allow for debugging.
+  std::unique_ptr<uint8_t, llvh::FreeDeleter> internalBytecodeCopy_;
 #endif
 
   /// Use an 8MB stack, which is the default size on mac and linux.

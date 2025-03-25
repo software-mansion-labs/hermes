@@ -318,13 +318,6 @@ cl::opt<bool> ParseTS(
 const bool ParseTS = false;
 #endif
 
-cl::opt<bool> ES6Class{
-    "Xes6-class",
-    llvh::cl::Hidden,
-    llvh::cl::desc("Enable support for ES6 Class"),
-    llvh::cl::init(false),
-    llvh::cl::cat(CompilerCategory)};
-
 cl::opt<bool> ES6BlockScoping{
     "Xes6-block-scoping",
     llvh::cl::Hidden,
@@ -653,7 +646,6 @@ std::shared_ptr<Context> createContext() {
   }
   context->setStrictMode(cli::Typed || cli::StrictMode);
   context->setEnableEval(cli::EnableEval);
-  context->setConvertES6Classes(cli::ES6Class);
   context->setEnableES6BlockScoping(cli::ES6BlockScoping);
   context->getSourceErrorManager().setOutputOptions(guessErrorOutputOptions());
 
@@ -802,6 +794,7 @@ ESTree::NodePtr parseJS(
     return parsedAST;
   }
 
+#if HERMES_PARSE_FLOW && HERMES_PARSE_TS
   // Convert TS AST to Flow AST as an intermediate step until we have a
   // separate TS type checker.
   if (flowContext && context->getParseTS()) {
@@ -810,6 +803,7 @@ ESTree::NodePtr parseJS(
       return nullptr;
     }
   }
+#endif
 
   // If we are executing in typed mode and not script, then wrap the program.
   if (shouldWrapInIIFE) {

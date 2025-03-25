@@ -137,8 +137,10 @@ DEFINE_OPCODE_2(FastArrayAppend, Reg8, Reg8)
 
 /// Perform a lookup on the new object cache.
 /// Arg1 = the 'this' value to lookup
-/// Arg2 = the index in the shape table.
-DEFINE_OPCODE_2(CacheNewObject, Reg8, UInt32)
+/// Arg2 = the new target to determine whether it is a constructor call
+/// Arg3 = the index in the shape table.
+/// Arg4 = the cache index within the current function
+DEFINE_OPCODE_4(CacheNewObject, Reg8, Reg8, UInt32, UInt8)
 
 /// Arg1 = Arg2 (Register copy)
 DEFINE_OPCODE_2(Mov, Reg8, Reg8)
@@ -326,6 +328,16 @@ OPERAND_STRING_ID(GetByIdShort, 4)
 OPERAND_STRING_ID(GetById, 4)
 OPERAND_STRING_ID(GetByIdLong, 4)
 
+/// Get an object property by string table index, with a specified receiver.
+/// Arg1 = Arg2[stringtable[Arg5]]
+/// Arg1 is the destination.
+/// Arg2 is the object to begin the property look up.
+/// Arg3 is a cache index used to speed up the above operation.
+/// Arg4 is receiver.
+/// Arg5 is the string id.
+DEFINE_OPCODE_5(GetByIdWithReceiverLong, Reg8, Reg8, UInt8, Reg8, UInt32)
+OPERAND_STRING_ID(GetByIdWithReceiverLong, 5)
+
 /// Get an object property by string table index, or throw if not found.
 /// This is similar to GetById, but intended for use with global variables
 /// where Arg2 = GetGlobalObject.
@@ -357,21 +369,6 @@ OPERAND_STRING_ID(TryPutByIdStrict, 4)
 OPERAND_STRING_ID(TryPutByIdLooseLong, 4)
 OPERAND_STRING_ID(TryPutByIdStrictLong, 4)
 
-/// Create a new own property on an object. This is similar to PutById, but
-/// the destination must be an object, it only deals with own properties,
-/// ignoring the prototype chain, and the property must not already be defined.
-/// Similarly to PutById, the property name cannot be a valid array index.
-/// Arg1 is the destination object, which is known to be an object.
-/// Arg2 is the value to write.
-/// Arg3 is the string table ID of the property name.
-/// Arg1[stringtable[Arg3]] = Arg2
-DEFINE_OPCODE_3(PutNewOwnByIdShort, Reg8, Reg8, UInt8)
-DEFINE_OPCODE_3(PutNewOwnById, Reg8, Reg8, UInt16)
-DEFINE_OPCODE_3(PutNewOwnByIdLong, Reg8, Reg8, UInt32)
-OPERAND_STRING_ID(PutNewOwnByIdShort, 3)
-OPERAND_STRING_ID(PutNewOwnById, 3)
-OPERAND_STRING_ID(PutNewOwnByIdLong, 3)
-
 /// Set an existing own property identified at a slot index.
 /// Arg1 is the destination object.
 /// Arg2 is the value to write.
@@ -388,24 +385,12 @@ DEFINE_OPCODE_3(PutOwnBySlotIdxLong, Reg8, Reg8, UInt32)
 DEFINE_OPCODE_3(GetOwnBySlotIdx, Reg8, Reg8, UInt8)
 DEFINE_OPCODE_3(GetOwnBySlotIdxLong, Reg8, Reg8, UInt32)
 
-/// Create a new non-enumerable own property on an object. This is the same as
-/// PutNewOwnById, but creates the property with different enumerability.
-/// Arg1 is the destination object.
-/// Arg2 is the value to write.
-/// Arg3 is the string table ID of the property name.
-/// Arg1[stringtable[Arg3]] = Arg2
-DEFINE_OPCODE_3(PutNewOwnNEById, Reg8, Reg8, UInt16)
-DEFINE_OPCODE_3(PutNewOwnNEByIdLong, Reg8, Reg8, UInt32)
-OPERAND_STRING_ID(PutNewOwnNEById, 3)
-OPERAND_STRING_ID(PutNewOwnNEByIdLong, 3)
-
-// The "NE" versions must be ordered after the "normal" versions.
-ASSERT_MONOTONE_INCREASING(
-    PutNewOwnByIdShort,
-    PutNewOwnById,
-    PutNewOwnByIdLong,
-    PutNewOwnNEById,
-    PutNewOwnNEByIdLong)
+/// Define an object own property by string index.
+/// Arg1[stringtable[Arg4]] = Arg2.
+/// Arg3 is a cache index.
+DEFINE_OPCODE_4(DefineOwnById, Reg8, Reg8, UInt8, UInt16)
+DEFINE_OPCODE_4(DefineOwnByIdLong, Reg8, Reg8, UInt8, UInt32)
+OPERAND_STRING_ID(DefineOwnByIdLong, 4)
 
 /// Assign a value to a constant integer own property which will be created as
 /// enumerable. This is used (potentially in conjunction with
@@ -430,12 +415,26 @@ DEFINE_OPCODE_3(GetByVal, Reg8, Reg8, Reg8)
 /// numeric literal that is a uint8_t integer. Arg1 = Arg2[Arg3]
 DEFINE_OPCODE_3(GetByIndex, Reg8, Reg8, UInt8)
 
+/// Get a property by value with a specified receiver.
+/// Arg1 = Arg2[Arg3]
+/// Arg1 is the destination register.
+/// Arg2 is the object to begin the property look up. It must be an object.
+/// Arg3 is the property key.
+/// Arg4 is the receiver.
+DEFINE_OPCODE_4(GetByValWithReceiver, Reg8, Reg8, Reg8, Reg8)
+
 /// Set a property by value. Constant string values should instead use GetById
 /// (unless they are array indices according to ES5.1 section 15.4, in which
 /// case this is still the right opcode).
 /// Arg1[Arg2] = Arg3
 DEFINE_OPCODE_3(PutByValLoose, Reg8, Reg8, Reg8)
 DEFINE_OPCODE_3(PutByValStrict, Reg8, Reg8, Reg8)
+
+/// Set a property by value, with a specified receiver.
+/// Arg1[Arg2] = Arg3
+/// Arg4 is the receiver
+/// Arg5 is true if this operation is strict, false for loose.
+DEFINE_OPCODE_5(PutByValWithReceiver, Reg8, Reg8, Reg8, Reg8, UInt8)
 
 /// Delete a property by value (when the value is not known at compile time).
 /// Arg1 = delete Arg2[Arg3]
@@ -609,6 +608,11 @@ DEFINE_OPCODE_1(Throw, Reg8)
 /// Arg2 is the value to check
 DEFINE_OPCODE_2(ThrowIfEmpty, Reg8, Reg8)
 
+/// If Arg2 is Undefined, throw ReferenceError, otherwise move it into Arg1.
+/// Arg1 is the destination of the return value
+/// Arg2 is the value to check
+DEFINE_OPCODE_2(ThrowIfUndefined, Reg8, Reg8)
+
 /// If Arg1 is not Empty, throw ReferenceError.
 /// Arg1 is the checked this of a derived constructor.
 DEFINE_OPCODE_1(ThrowIfThisInitialized, Reg8)
@@ -644,7 +648,7 @@ DEFINE_OPCODE_5(CreateDerivedClassLongIndex, Reg8, Reg8, Reg8, Reg8, UInt32)
 
 /// Create a closure.
 /// Arg1 is the register in which to store the closure.
-/// Arg2 is the current environment.
+/// Arg2 is the parent environment of the closure, or undefined.
 /// Arg3 is index in the function table.
 DEFINE_OPCODE_3(CreateClosure, Reg8, Reg8, UInt16)
 DEFINE_OPCODE_3(CreateClosureLongIndex, Reg8, Reg8, UInt32)
@@ -797,7 +801,7 @@ DEFINE_OPCODE_5(SwitchImm, Reg8, UInt32, Addr32, UInt32, UInt32)
 
 /// Create a generator.
 /// Arg1 is the register in which to store the generator.
-/// Arg2 is the current environment.
+/// Arg2 is the parent environment of the generator, or undefined.
 /// Arg3 is index in the function table.
 DEFINE_OPCODE_3(CreateGenerator, Reg8, Reg8, UInt16)
 DEFINE_OPCODE_3(CreateGeneratorLongIndex, Reg8, Reg8, UInt32)
@@ -924,8 +928,6 @@ ASSERT_EQUAL_LAYOUT3(PutByIdLoose, PutByIdLooseLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, PutByIdStrictLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, TryPutByIdLooseLong)
 ASSERT_EQUAL_LAYOUT3(PutByIdLoose, TryPutByIdStrictLong)
-ASSERT_EQUAL_LAYOUT3(PutNewOwnById, PutNewOwnNEById)
-ASSERT_EQUAL_LAYOUT3(PutNewOwnByIdLong, PutNewOwnNEByIdLong)
 ASSERT_EQUAL_LAYOUT3(Add, AddN)
 ASSERT_EQUAL_LAYOUT3(Sub, SubN)
 ASSERT_EQUAL_LAYOUT3(Mul, MulN)

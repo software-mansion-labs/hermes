@@ -248,6 +248,15 @@ bool Verifier::visitFunction(const Function &F) {
         "Only GetNewTargetInst may use the newTargetParam");
   }
 
+  for (Instruction *user : F.getUsers()) {
+    AssertIWithMsg(
+        (*user),
+        llvh::isa<BaseCallInst>(user) ||
+            llvh::isa<BaseCreateLexicalChildInst>(user) ||
+            llvh::isa<GetClosureScopeInst>(user),
+        "Function can only be an operand to certain instructions");
+  }
+
   FunctionState newFunctionState(this, F);
 
   // Verify all basic blocks are valid
@@ -454,24 +463,12 @@ bool Verifier::visitBasicBlock(const BasicBlock &BB) {
                             << bbLabel(**I));
   }
 
-  // Indicates whether all the instructions in the block observed so far had
-  // FirstInBlock set.
-  bool visitingFirstInBlock = true;
   // Verify each instruction
   for (BasicBlock::const_iterator I = BB.begin(); I != BB.end(); I++) {
     AssertWithMsg(
         I->getParent() == &BB,
         "Instruction " << iLabel(*I) << "'s parent " << bbLabel(*I->getParent())
                        << " does not match " << bbLabel(BB));
-
-    // Check that FirstInBlock instructions are not preceded by other
-    // instructions.
-    bool firstInBlock = I->getSideEffect().getFirstInBlock();
-    visitingFirstInBlock &= firstInBlock;
-    AssertIWithMsg(
-        (*I),
-        visitingFirstInBlock || !firstInBlock,
-        "Unexpected FirstInBlock instruction.");
 
     // Use the instruction using the InstructionVisitor::visit();
     ReturnIfNot(verifyBeforeVisitInstruction(*I));
@@ -501,6 +498,27 @@ bool Verifier::visitVariableScope(const hermes::VariableScope &VS) {
         VS.getParentScope() == curParentVS,
         "VariableScope has multiple different parents.");
   }
+
+  // Check that every variable with a load has at least one store.
+  // NOTE: Don't run this in IR_LOWERED because OptEnvironmentInit breaks this
+  // assumption.
+  if (verificationMode != VerificationMode::IR_LOWERED) {
+    for (auto *var : VS.getVariables()) {
+      bool hasLoad = false;
+      bool hasStore = false;
+      for (auto *varUser : VS.getUsers()) {
+        hasLoad |= llvh::isa<LoadFrameInst>(varUser);
+        hasStore |= llvh::isa<StoreFrameInst>(varUser);
+      }
+      if (hasLoad) {
+        AssertWithMsg(
+            hasStore,
+            "Variable " << var->getName()
+                        << " must have a store for it to load");
+      }
+    }
+  }
+
   return true;
 }
 
@@ -519,6 +537,22 @@ bool Verifier::verifyBeforeVisitInstruction(const Instruction &Inst) {
         Inst, Inst.hasOutput(), "Instruction with type does not have output");
   }
 
+  if (Inst.getSideEffect().getFirstInBlock()) {
+    if (llvh::isa<PhiInst>(&Inst)) {
+      // Phis must be first in block, but they may be preceded by other Phis.
+      AssertIWithMsg(
+          Inst,
+          !Inst.getPrevNode() || llvh::isa<PhiInst>(Inst.getPrevNode()),
+          "Phi can only be preceded by other Phis");
+    } else {
+      // All other FirstInBlock instructions must be first in the block.
+      AssertIWithMsg(
+          Inst,
+          !Inst.getPrevNode(),
+          "FirstInBlock instruction must be first in the block");
+    }
+  }
+
   ReturnIfNot(verifyAttributes(&Inst));
 
   bool const acceptsEmptyType = Inst.acceptsEmptyType();
@@ -527,10 +561,12 @@ bool Verifier::verifyBeforeVisitInstruction(const Instruction &Inst) {
   for (unsigned i = 0; i < Inst.getNumOperands(); i++) {
     auto Operand = Inst.getOperand(i);
     AssertIWithMsg(Inst, Operand != nullptr, "Invalid operand");
-    AssertIWithMsg(
-        Inst,
-        getUsersSetForValue(Operand).count(&Inst) == 1,
-        "This instruction is not in the User list of the operand");
+    if (Operand->tracksUsers()) {
+      AssertIWithMsg(
+          Inst,
+          getUsersSetForValue(Operand).count(&Inst) == 1,
+          "This instruction is not in the User list of the operand");
+    }
     if (llvh::isa<Variable>(Operand)) {
       AssertIWithMsg(
           Inst,
@@ -708,6 +744,20 @@ bool Verifier::visitAllocStackInst(const AllocStackInst &Inst) {
       Inst,
       &(Inst.getParent()->back()) != &Inst,
       "Alloca Instruction cannot be the last instruction of a basic block");
+  bool hasLoad = false;
+  bool hasStore = false;
+  for (auto *user : Inst.getUsers()) {
+    hasLoad |= user->getSideEffect().getReadStack();
+    hasStore |= user->getSideEffect().getWriteStack();
+  }
+
+  // TODO: Make this check better by ensuring that there's a store
+  // prior to the load for every possible path through the function.
+  // This isn't dominance, because there may be two stores in separate
+  // branches prior to the load.
+  if (hasLoad)
+    AssertIWithMsg(Inst, hasStore, "LoadStackInst must have a StoreStackInst");
+
   return true;
 }
 
@@ -846,7 +896,10 @@ bool Verifier::visitBaseCreateLexicalChildInst(
     const hermes::BaseCreateLexicalChildInst &Inst) {
   auto *scope = Inst.getScope();
   AssertIWithMsg(
-      Inst, scope->getType().isEnvironmentType(), "Wrong scope type");
+      Inst,
+      llvh::isa<EmptySentinel>(scope) || scope->getType().isUndefinedType() ||
+          scope->getType().isEnvironmentType(),
+      "Wrong scope type");
   // Verify that any GetParentScope inside the function produces the same
   // VariableScope that the function is being created with.
   if (auto *BSI = llvh::dyn_cast<BaseScopeInst>(scope)) {
@@ -929,6 +982,10 @@ bool Verifier::visitGetBuiltinClosureInst(GetBuiltinClosureInst const &Inst) {
 bool Verifier::visitLoadPropertyInst(const LoadPropertyInst &Inst) {
   return true;
 }
+bool Verifier::visitLoadPropertyWithReceiverInst(
+    const LoadPropertyWithReceiverInst &Inst) {
+  return true;
+}
 bool Verifier::visitTryLoadGlobalPropertyInst(
     const TryLoadGlobalPropertyInst &Inst) {
   return true;
@@ -942,6 +999,11 @@ bool Verifier::visitDeletePropertyLooseInst(
 bool Verifier::visitDeletePropertyStrictInst(
     const DeletePropertyStrictInst &Inst) {
   // Nothing to verify at this point.
+  return true;
+}
+
+bool Verifier::visitStorePropertyWithReceiverInst(
+    const StorePropertyWithReceiverInst &Inst) {
   return true;
 }
 
@@ -992,6 +1054,10 @@ bool Verifier::visitDefineNewOwnPropertyInst(
         llvh::isa<LiteralString>(Inst.getProperty()),
         "DefineNewOwnPropertyInst::Property must be a string or number literal");
   }
+  AssertIWithMsg(
+      Inst,
+      Inst.getIsEnumerable(),
+      "DefineNewOwnPropertyInst::IsEnumerable must be true");
   return true;
 }
 
@@ -1319,6 +1385,16 @@ bool Verifier::visitGetParentScopeInst(const GetParentScopeInst &Inst) {
       Inst,
       Inst.getParentScopeParam() == Inst.getFunction()->getParentScopeParam(),
       "Using incorect parent scope parameter.");
+
+  for (auto *U : Inst.getFunction()->getUsers()) {
+    if (auto *BCLI = llvh::dyn_cast<BaseCreateLexicalChildInst>(U)) {
+      AssertIWithMsg(
+          Inst,
+          BCLI->getVarScope() == Inst.getVariableScope(),
+          "Scope result does not match function creation");
+      break;
+    }
+  }
   return true;
 }
 bool Verifier::visitCreateScopeInst(const CreateScopeInst &Inst) {
@@ -1333,6 +1409,15 @@ bool Verifier::visitLIRResolveScopeInst(
 }
 bool Verifier::visitGetClosureScopeInst(
     const hermes::GetClosureScopeInst &Inst) {
+  for (auto *U : Inst.getFunctionCode()->getUsers()) {
+    if (auto *BCLI = llvh::dyn_cast<BaseCreateLexicalChildInst>(U)) {
+      AssertIWithMsg(
+          Inst,
+          BCLI->getVarScope() == Inst.getVariableScope(),
+          "Scope result does not match function creation");
+      return true;
+    }
+  }
   return true;
 }
 
@@ -1352,6 +1437,11 @@ bool Verifier::visitHBCAllocObjectFromBufferInst(
 
 bool Verifier::visitAllocObjectLiteralInst(
     const hermes::AllocObjectLiteralInst &Inst) {
+  return true;
+}
+
+bool Verifier::visitAllocTypedObjectInst(
+    const hermes::AllocTypedObjectInst &Inst) {
   return true;
 }
 
@@ -1390,18 +1480,6 @@ bool Verifier::visitCreateGeneratorInst(const CreateGeneratorInst &Inst) {
       Inst,
       llvh::isa<BaseScopeInst>(Inst.getScope()),
       "CreateGeneratorInst must take a BaseScopeInst");
-  return true;
-}
-bool Verifier::visitStartGeneratorInst(const StartGeneratorInst &Inst) {
-  AssertIWithMsg(
-      Inst,
-      &Inst == &Inst.getParent()->front() &&
-          Inst.getParent() == &Inst.getParent()->getParent()->front(),
-      "StartGeneratorInst must be the first instruction of a function");
-  AssertIWithMsg(
-      Inst,
-      !M.areGeneratorsLowered(),
-      "Should not exist after generators are lowered");
   return true;
 }
 bool Verifier::visitResumeGeneratorInst(const ResumeGeneratorInst &Inst) {

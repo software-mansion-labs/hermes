@@ -374,8 +374,8 @@ Effects | Does not read or write to memory.
 GetClosureScopeInst | _
 --- | --- |
 Description | Retrieve the scope from the given closure.
-Example | %0 = GetClosureScopeInst %varScope, %closure
-Arguments | %varScope is the VariableScope that describes the resulting scope. %closure is the closure from which to read the scope.
+Example | %0 = GetClosureScopeInst %varScope, %function, %closure
+Arguments | %varScope is the VariableScope that describes the resulting scope. %function is the IR function that the closure operand is known to refer to. %closure is the closure from which to read the scope.
 Semantics | The instruction returns the scope stored in the given closure.
 Effects | Does not read or write to memory.
 
@@ -384,8 +384,8 @@ Effects | Does not read or write to memory.
 CreateFunctionInst | _
 --- | --- |
 Description | Constructs a new function into the current scope from its code representation.
-Example | %0 = CreateFunction %scope, %function
-Arguments | %function is the function that represents the code of the generated closure. %scope is the surrounding environment.
+Example | %0 = CreateFunction %scope, %varScope, %function
+Arguments | %function is the function that represents the code of the generated closure. %scope is the surrounding environment. %varScope is the VariableScope that describes %scope.
 Semantics | The instruction creates a new closure that may access the lexical scope of the current function
 Effects | Does not read or write to memory.
 
@@ -394,8 +394,8 @@ Effects | Does not read or write to memory.
 CreateClassInst | _
 --- | --- |
 Description | Constructs a new class into the current scope from its constructor code representation.
-Example | %0 = CreateClassInst %scope, %function, %superClass, %homeObjectOutput
-Arguments | %function is the function that represents the code of the constructor. %scope is the surrounding environment. %superClass is the class to inherit from; in base classes this is an empty sentinel value. %homeObjectOutput is an out parameter which will contain the home object (.prototype) of the class.
+Example | %0 = CreateClassInst %scope, %varScope, %function, %superClass, %homeObjectOutput
+Arguments | %function is the function that represents the code of the constructor. %scope is the surrounding environment. %varScope is the VariableScope that describes %scope. %superClass is the class to inherit from; in base classes this is an empty sentinel value. %homeObjectOutput is an out parameter which will contain the home object (.prototype) of the class.
 Semantics | The instruction creates a new class that may access the lexical scope of the current function, and an inherit from a given super class. (ES2023 15.7.14) This results in the creation of 2 objects: the class function object itself, and the "home" object. The home object is where methods are put. The home object can be found on the .prototype of the class, and the class can be found on the .constructor of the home object.
 Effects | Writes to stack memory. May execute JS if it's a derived class.
 
@@ -425,7 +425,7 @@ CreateThisInst | _
 --- | --- |
 Description | Creates the object to be used as the `this` parameter of a construct call.
 Example | %0 = CreateThisInst %closure, %newtarget
-Arguments | %closure is the closure that will be invoked as a constructor, %newtarget is the new.target value to use for the call.
+Arguments | %closure is the closure that will be invoked as a constructor, it may be any value, and the instruction will throw if it is not a valid callable. %newtarget is the new.target value to use for the call, it must either be the same value as %closure, or a valid callable.
 Semantics | The instruction is responsible for preparing the `this` parameter of a construct call. In normal cases, this means creating an object with its parent set to the .prototype of %newtarget. However, there are some functions which are responsible for making their own this. In these cases, this instruction returns undefined.
 Effects | May read and write memory.
 
@@ -487,6 +487,16 @@ Arguments | %object is the global object. %property is the name of the field, wh
 Semantics | Similar to LoadPropertyInst, but throw if the field doesn't exist.
 Effects | May read and write memory or throw.
 
+### LoadPropertyWithReceiverInst
+
+LoadPropertyWithReceiverInst | _
+--- | --- |
+Description | Loads the value of a field from a JavaScript object.
+Example |  %0 = LoadPropertyWithReceiverInst %object, %property, %receiver
+Arguments | %object is the object to load from. %property is the name of the field. %receiver is receiver of the operation.
+Semantics | The instruction implements ES2024 6.2.5.5 GetValue. This is used for `super` references.
+Effects | May read and write memory or throw.
+
 ### DeletePropertyInst
 
 DeletePropertyInst | _
@@ -505,6 +515,17 @@ Description | Stores a value to field in a JavaScript object.
 Example |   %4 = StorePropertyInst %value, %object, %property
 Arguments | %value is the value to be stored. %object is the object where the field %property will be created or modified.
 Semantics | The instruction follows the rules of JavaScript property access in ES5.1 sec 11.2.1. The operation PutValue (ES5.1. sec 8.7.2) is then applied to the returned Reference.
+Effects | May read and write memory or throw.
+
+
+### StorePropertyWithReceiverInst
+
+StorePropertyWithReceiverInst | _
+--- | --- |
+Description | Stores a value to field in a JavaScript object, with a specified receiver object.
+Example |   %4 = StorePropertyWithReceiverInst %value, %object, %property, %receiver, %isStrict
+Arguments | %value is the value to be stored. %object is the object where the field %property will be created or modified. %receiver will be the receiver operand when invoking the `[[Set]] ` internal method. If %isStrict is true, the operation will fail if there is an incompatible property descriptor found during the attempted store..
+Semantics | This follows the same semantics as StorePropertyInst, except the receiver is explicitly specified.
 Effects | May read and write memory or throw.
 
 ### TryStoreGlobalPropertyInst
@@ -565,6 +586,16 @@ Description | Allocates a new JavaScript object on the heap. During lowering pas
 Example |  %0 = AllocObjectLiteralInst "prop1" : string, 10 : number
 Arguments | %prop_map is a vector of (Literal*, value*) pairs which represents the properties and their keys in the object literal.
 Semantics | The instruction creates a new JavaScript object on the heap with an initial list of properties.
+Effects | Does not read or write to memory.
+
+### AllocTypedObjectInst
+
+AllocTypedObjectInst | _
+--- | --- |
+Description | Allocates a new typed object on the heap. During lowering pass it will be lowered to either an AllocObjectInst or a HBCAllocObjectFromBufferInst.
+Example |  %0 = AllocTypedObjectInst %parent, "prop1" : string, 10 : number
+Arguments | %parent is the parent of the new object, and the other operands are alternating (Literal*, value*) pairs which represent the properties and their keys in the typed class.
+Semantics | The instruction creates a new JavaScript object on the heap with an initial list of properties, which may include 'uninit' values.
 Effects | Does not read or write to memory.
 
 ### AllocArrayInst
@@ -813,20 +844,10 @@ Effects | Does not read or write memory (it potentially creates a new object)
 CreateGenerator | _
 --- | --- |
 Description | Constructs a new GeneratorInnerFunction from its code representation, and wraps it in a Generator object.
-Example | %0 = CreateGenerator %function,
-Arguments | %function is the function that represents the code of the generator's inner function.
+Example | %0 = CreateFunction %scope, %varScope, %function
+Arguments | %function is the function that represents the code of the generator's inner function. %scope is the surrounding environment. %varScope is the VariableScope that describes %scope.
 Semantics | Creates a new GeneratorInnerFunction closure that may access the environment and wraps it in a generator
 Effects | Does not read or write to memory (creates a new object).
-
-### StartGenerator
-
-StartGenerator | _
---- | --- |
-Description | Jump to the proper first instruction to execute in a GeneratorInnerFunction
-Example |  %0 = StartGenerator
-Arguments | None
-Semantics | Jumps to a BasicBlock which begins with a ResumeGenerator and sets the internal generator state to "executing", but does not handle next(), return(), or throw() as requested by the user.
-Effects | Reads and writes memory. Restores the stack based on saved state, and jumps to another BasicBlock
 
 ### SaveAndYield
 

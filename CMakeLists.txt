@@ -232,13 +232,7 @@ set(HERMES_USE_STATIC_ICU OFF CACHE BOOL
 set(HERMES_UNICODE_LITE OFF CACHE BOOL
   "Enable to use internal no-op unicode functionality instead of relying on underlying system libraries")
 
-if(WIN32)
-  set(DEFAULT_HERMES_CHECK_NATIVE_STACK OFF)
-else()
-  set(DEFAULT_HERMES_CHECK_NATIVE_STACK ON)
-endif()
-
-set(HERMES_CHECK_NATIVE_STACK ${DEFAULT_HERMES_CHECK_NATIVE_STACK} CACHE BOOL
+set(HERMES_CHECK_NATIVE_STACK ON CACHE BOOL
   "Check the native stack for stack overflow")
 
 set(HERMES_ENABLE_DEBUGGER OFF CACHE BOOL
@@ -320,12 +314,6 @@ if (HERMES_UNICODE_LITE)
 endif()
 
 if(HERMES_CHECK_NATIVE_STACK)
-  if (WIN32)
-    message(
-      FATAL_ERROR
-      "Native stack checking not supported on Windows"
-    )
-  endif()
   add_definitions(-DHERMES_CHECK_NATIVE_STACK)
 endif()
 
@@ -586,31 +574,28 @@ endif()
 # to analyze the source code of the project.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Attempt to use system ICU first, if none specified.
 # Don't need ICU on Apple, Emscripten, and Android.
 if (APPLE OR EMSCRIPTEN OR HERMES_IS_ANDROID OR HERMES_UNICODE_LITE)
   set(ICU_FOUND 1)
 endif()
 
 if (NOT ICU_FOUND)
-  if (NOT ICU_ROOT)
-    set(FB_ICU_ROOT_A "/mnt/gvfs/third-party2/icu/4e8f3e00e1c7d7315fd006903a9ff7f073dfc02b/53.1/gcc-5-glibc-2.23/9bc6787")
-    set(FB_ICU_ROOT_B "/mnt/gvfs/third-party2/icu/4e8f3e00e1c7d7315fd006903a9ff7f073dfc02b/53.1/gcc-4.8.1-glibc-2.17/c3f970a/")
-    if(EXISTS ${FB_ICU_ROOT_A})
-      set(ICU_ROOT ${FB_ICU_ROOT_A})
-    elseif(EXISTS ${FB_ICU_ROOT_B})
-      set(ICU_ROOT ${FB_ICU_ROOT_B})
-    endif()
-  endif()
   set(CMAKE_FIND_LIBRARY_SUFFIXES_OLD "${CMAKE_FIND_LIBRARY_SUFFIXES}")
   if (HERMES_USE_STATIC_ICU)
     add_definitions(-DU_STATIC_IMPLEMENTATION)
     set(CMAKE_FIND_LIBRARY_SUFFIXES "${CMAKE_STATIC_LIBRARY_SUFFIX}")
   endif()
 
-  # FindICU uses ICU_ROOT variable as a hint
-  # Include 'uc' twice for static libraries that depend on each other.
-  find_global_package(ICU 52 COMPONENTS uc i18n data uc)
+  if (HERMES_ENABLE_INTL)
+    # Attempt to locate a system-installed ICU. A minimum version of 65 is
+    # required because our ICU-based Intl implementation relies on APIs introduced
+    # in version 65.
+    # Include 'uc' twice for static libraries that depend on each other.
+    find_global_package(ICU 65 COMPONENTS uc i18n data uc)
+  else()
+    # Include 'uc' twice for static libraries that depend on each other.
+    find_global_package(ICU 52 COMPONENTS uc i18n data uc)
+  endif()
 
   set(CMAKE_FIND_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES_OLD}")
 
@@ -705,6 +690,14 @@ elseif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../jsi)
   set(HERMES_JSI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../jsi)
 else()
   message(FATAL_ERROR "Unable to find jsi.")
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../hermes_common)
+  set(HERMES_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../hermes_common)
+elseif(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../hermes_common)
+  set(HERMES_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../hermes_common)
+else()
+  set(HERMES_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 include_directories(
@@ -820,7 +813,8 @@ if(HERMES_ENABLE_TEST_SUITE)
     hbcdump=${HERMES_TOOLS_OUTPUT_DIR}/hbcdump
     hbc-deltaprep=${HERMES_TOOLS_OUTPUT_DIR}/hbc-deltaprep
     hbc_diff=${HERMES_TOOLS_OUTPUT_DIR}/hbc-diff
-    build_mode="$<IF:$<CONFIG:Debug>,dbg,opt>"
+    slow_debug=$<IF:$<CONFIG:Debug>,${HERMES_SLOW_DEBUG},OFF>
+    debug_options=$<IF:$<CONFIG:Debug>,ON,OFF>
     exception_on_oom_enabled=${HERMESVM_EXCEPTION_ON_OOM}
     node_hermes_enabled_flag=${HERMES_BUILD_NODE_HERMES}
     node-hermes=${HERMES_TOOLS_OUTPUT_DIR}/node-hermes

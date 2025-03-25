@@ -289,7 +289,10 @@ class Emitter {
   /// Whether to emit asserts in the JIT'ed code.
   bool const emitAsserts_;
 
+#ifndef ASMJIT_NO_LOGGING
   std::unique_ptr<asmjit::Logger> logger_{};
+#endif
+
   std::unique_ptr<asmjit::ErrorHandler> errorHandler_;
   asmjit::Error expectedError_ = asmjit::kErrorOk;
 
@@ -394,16 +397,13 @@ class Emitter {
       unsigned dumpJitCode,
       bool emitAsserts,
       CodeBlock *codeBlock,
-      PropertyCacheEntry *readPropertyCache,
-      PropertyCacheEntry *writePropertyCache,
+      ReadPropertyCacheEntry *readPropertyCache,
+      WritePropertyCacheEntry *writePropertyCache,
       uint32_t numFrameRegs,
       const std::function<void(std::string &&message)> &longjmpError);
 
   /// Add the jitted function to the JIT runtime and return a pointer to it.
-  /// \param exceptionHandlers the labels for the exception handler table.
-  JITCompiledFunctionPtr addToRuntime(
-      asmjit::JitRuntime &jr,
-      llvh::ArrayRef<const asmjit::Label *> exceptionHandlers);
+  JITCompiledFunctionPtr addToRuntime(asmjit::JitRuntime &jr);
 
 #ifdef NDEBUG
   void assertPostInstructionInvariants() {}
@@ -422,7 +422,10 @@ class Emitter {
   /// Annotated with printf-style format.
   void comment(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
-  void leave();
+  /// Emit the catch table, slow paths, thunks and RO data,
+  /// then reset the stack, end any try, and return.
+  /// \param exceptionHandlers the labels for the exception handler table.
+  void leave(llvh::ArrayRef<const asmjit::Label *> exceptionHandlers);
   void newBasicBlock(const asmjit::Label &label);
 
   /// Abort execution.
@@ -492,35 +495,38 @@ class Emitter {
   DECL_BINOP(divN, true, "divN", _sh_ljs_div_rjs, { as.fdiv(res, dl, dr); })
 #undef DECL_BINOP
 
-#define DECL_BIT_BINOP(methodName, commentStr, slowCall, a64body) \
-  void methodName(FR rRes, FR rLeft, FR rRight) {                 \
-    bitBinOp(                                                     \
-        rRes,                                                     \
-        rLeft,                                                    \
-        rRight,                                                   \
-        commentStr,                                               \
-        slowCall,                                                 \
-        #slowCall,                                                \
-        [](a64::Assembler & a,                                    \
-           const a64::GpX &res,                                   \
-           const a64::GpX &dl,                                    \
-           const a64::GpX &dr) a64body);                          \
+#define DECL_BIT_BINOP(methodName, unsignedRes, commentStr, slowCall, a64body) \
+  void methodName(FR rRes, FR rLeft, FR rRight) {                              \
+    bitBinOp(                                                                  \
+        rRes,                                                                  \
+        rLeft,                                                                 \
+        rRight,                                                                \
+        unsignedRes,                                                           \
+        commentStr,                                                            \
+        slowCall,                                                              \
+        #slowCall,                                                             \
+        [](a64::Assembler & a,                                                 \
+           const a64::GpX &res,                                                \
+           const a64::GpX &dl,                                                 \
+           const a64::GpX &dr) a64body);                                       \
   }
 
-  DECL_BIT_BINOP(bitAnd, "bit_and", _sh_ljs_bit_and_rjs, {
+  DECL_BIT_BINOP(bitAnd, false, "bit_and", _sh_ljs_bit_and_rjs, {
     a.and_(res, dl, dr);
   })
-  DECL_BIT_BINOP(bitOr, "bit_or", _sh_ljs_bit_or_rjs, { a.orr(res, dl, dr); })
-  DECL_BIT_BINOP(bitXor, "bit_xor", _sh_ljs_bit_xor_rjs, {
+  DECL_BIT_BINOP(bitOr, false, "bit_or", _sh_ljs_bit_or_rjs, {
+    a.orr(res, dl, dr);
+  })
+  DECL_BIT_BINOP(bitXor, false, "bit_xor", _sh_ljs_bit_xor_rjs, {
     a.eor(res, dl, dr);
   })
-  DECL_BIT_BINOP(lShift, "lshift", _sh_ljs_left_shift_rjs, {
+  DECL_BIT_BINOP(lShift, false, "lshift", _sh_ljs_left_shift_rjs, {
     a.lsl(res.w(), dl.w(), dr.w());
   })
-  DECL_BIT_BINOP(rShift, "rshift", _sh_ljs_right_shift_rjs, {
+  DECL_BIT_BINOP(rShift, false, "rshift", _sh_ljs_right_shift_rjs, {
     a.asr(res.w(), dl.w(), dr.w());
   })
-  DECL_BIT_BINOP(urShift, "rshiftu", _sh_ljs_unsigned_right_shift_rjs, {
+  DECL_BIT_BINOP(urShift, true, "rshiftu", _sh_ljs_unsigned_right_shift_rjs, {
     a.lsr(res.w(), dl.w(), dr.w());
   })
 
@@ -683,10 +689,25 @@ class Emitter {
       "putByValStrict",
       _sh_ljs_put_by_val_strict_rjs);
 
+  void putByValWithReceiver(
+      FR frTarget,
+      FR frKey,
+      FR frValue,
+      FR frReceiver,
+      bool isStrict);
+
 #define DECL_GET_BY_ID(methodName, commentStr, shFn)                           \
   void methodName(FR frRes, SHSymbolID symID, FR frSource, uint8_t cacheIdx) { \
     getByIdImpl(frRes, symID, frSource, cacheIdx, commentStr, shFn, #shFn);    \
   }
+
+  void getByIdWithReceiver(
+      FR frRes,
+      SHSymbolID symID,
+      FR frSource,
+      FR frReceiver,
+      uint8_t cacheIdx);
+  void getByValWithReceiver(FR frRes, FR frSource, FR frKey, FR frReceiver);
 
   DECL_GET_BY_ID(getById, "getById", _sh_ljs_get_by_id_rjs)
   DECL_GET_BY_ID(tryGetById, "tryGetById", _sh_ljs_try_get_by_id_rjs)
@@ -708,6 +729,8 @@ class Emitter {
       "tryPutByIdStrict",
       _sh_ljs_try_put_by_id_strict_rjs);
 
+  void
+  defineOwnById(FR frTarget, SHSymbolID symID, FR frValue, uint8_t cacheIdx);
   void defineOwnByIndex(FR frTarget, FR frValue, uint32_t key);
   void defineOwnByVal(FR frTarget, FR frValue, FR frKey, bool enumerable);
   void defineOwnGetterSetterByVal(
@@ -716,8 +739,6 @@ class Emitter {
       FR frGetter,
       FR frSetter,
       bool enumerable);
-
-  void putNewOwnById(FR frTarget, FR frValue, SHSymbolID key, bool enumerable);
 
   void getOwnBySlotIdx(FR frRes, FR frTarget, uint32_t slotIdx);
   void putOwnBySlotIdx(FR frTarget, FR frValue, uint32_t slotIdx);
@@ -756,6 +777,7 @@ class Emitter {
   void createFunctionEnvironment(FR frRes, uint32_t size);
   void createEnvironment(FR frRes, FR frParent, uint32_t size);
   void getParentEnvironment(FR frRes, uint32_t level);
+  void getEnvironment(FR frRes, FR frSource, uint32_t level);
   void getClosureEnvironment(FR frRes, FR frClosure);
   void loadFromEnvironment(FR frRes, FR frEnv, uint32_t slot);
   void storeToEnvironment(bool np, FR frEnv, uint32_t slot, FR frValue);
@@ -810,7 +832,12 @@ class Emitter {
 
   void debugger();
   void throwInst(FR frInput);
-  void throwIfEmpty(FR frRes, FR frInput);
+  void throwIfEmpty(FR frRes, FR frInput) {
+    throwIfEmptyUndefinedImpl(frRes, frInput, true);
+  }
+  void throwIfUndefined(FR frRes, FR frInput) {
+    throwIfEmptyUndefinedImpl(frRes, frInput, false);
+  }
   void throwIfThisInitialized(FR frInput);
 
   void createRegExp(
@@ -830,6 +857,15 @@ class Emitter {
     auto ofs = (fr.index() + hbc::StackFrameLayout::FirstLocal) *
         sizeof(SHLegacyValue);
     return a64::Mem(xFrame, ofs);
+  }
+
+  /// Return true if we are logging, false otherwise.
+  bool hasLogger() {
+#ifndef ASMJIT_NO_LOGGING
+    return logger_ != nullptr;
+#else
+    return false;
+#endif
   }
 
   /// Load an arbitrary bit pattern into a Gp.
@@ -1101,6 +1137,7 @@ class Emitter {
       FR frRes,
       FR frLeft,
       FR frRight,
+      bool unsignedRes,
       const char *name,
       SHLegacyValue (*slowCall)(
           SHRuntime *shr,
@@ -1158,7 +1195,7 @@ class Emitter {
           SHRuntime *shr,
           const SHLegacyValue *source,
           SHSymbolID symID,
-          SHPropertyCacheEntry *propCacheEntry),
+          SHReadPropertyCacheEntry *propCacheEntry),
       const char *shImplName);
 
   void putByIdImpl(
@@ -1172,7 +1209,7 @@ class Emitter {
           SHLegacyValue *target,
           SHSymbolID symID,
           SHLegacyValue *value,
-          SHPropertyCacheEntry *propCacheEntry),
+          SHWritePropertyCacheEntry *propCacheEntry),
       const char *shImplName);
 
   void getArgumentsPropByValImpl(
@@ -1188,6 +1225,8 @@ class Emitter {
       const char *shImplName);
 
   void reifyArgumentsImpl(FR frLazyReg, bool strict, const char *name);
+
+  void throwIfEmptyUndefinedImpl(FR frRes, FR frInput, bool empty);
 }; // class Emitter
 
 } // namespace hermes::vm::arm64

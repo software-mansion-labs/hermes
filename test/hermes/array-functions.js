@@ -5,9 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-// RUN: ulimit -s 1024 && %hermes -target=HBC -O %s | %FileCheck --match-full-lines %s
-// RUN: ulimit -s 1024 && %hermes -target=HBC -O -emit-binary -out %t.hbc %s && %hermes %t.hbc | %FileCheck --match-full-lines %s
+// RUN: %hermes -target=HBC -O %s | %FileCheck --match-full-lines %s
+// RUN: %hermes -target=HBC -O -emit-binary -out %t.hbc %s && %hermes %t.hbc | %FileCheck --match-full-lines %s
+// RUN: %shermes -exec %s | %FileCheck --match-full-lines %s
 "use strict";
+
+// TODO: adopt some of the helpers from array-reverse.js
 
 // Performs a nested array comparison between the two arrays.
 function arrayEquals(a, b) {
@@ -323,99 +326,67 @@ print(a.pop());
 print(a.length);
 // CHECK-NEXT: 4294967294
 
-print('reverse');
-// CHECK-LABEL: reverse
+print('push');
+// CHECK-LABEL: push
 var a = [1,2,3];
-print(a.reverse(), a);
-// CHECK-NEXT: 3,2,1 3,2,1
-print([1,2].reverse());
-// CHECK-NEXT: 2,1
-print('empty', [].reverse());
-// CHECK-NEXT: empty
-print([12,13,14,15,16,17,18].reverse());
-// CHECK-NEXT: 18,17,16,15,14,13,12
-print([,,,1].reverse());
-// CHECK-NEXT: 1,,,
-print([,,1,,5,7,,].reverse());
-// CHECK-NEXT: ,7,5,,1,,
-var a = {};
-a[0] = 'a';
-a[1] = 'b';
-a[5] = 'c';
-a.length = 6;
-Array.prototype.reverse.call(a);
-print(a[0], a[4], a[5]);
-// CHECK-NEXT: c b a
-var a = [0, 1, 2, 3];
-Object.defineProperty(a, 3, {
-  get: function() {
-    delete a[1];
-    return -1;
-  },
-  set: function() { print('setter'); }
+print(a.push(1834), a.toString());
+// CHECK-NEXT: 4 1,2,3,1834
+print(a.push('abcd', 746, 133), a.toString());
+// CHECK-NEXT: 7 1,2,3,1834,abcd,746,133
+print(a.push(), a.toString());
+// CHECK-NEXT: 7 1,2,3,1834,abcd,746,133
+print(a.pop(), a.toString());
+// CHECK-NEXT: 133 1,2,3,1834,abcd,746
+print(a.push('last'), a.toString());
+// CHECK-NEXT: 7 1,2,3,1834,abcd,746,last
+var a = [,,,'x','y','z'];
+print(a)
+// CHECK-NEXT: ,,,x,y,z
+print(a.push(1,2,3), a);
+// CHECK-NEXT: 9 ,,,x,y,z,1,2,3
+var a = {3: 'x', 4: 'y', length: 5};
+Array.prototype.push.call(a, 'z', 'last');
+print(a.length, a[5], a[6]);
+// CHECK-NEXT: 7 z last
+var a = Array(0xfffffffe);
+print(a.length);
+// CHECK-NEXT: 4294967294
+a.push('arrEnd');
+print(a.length, a[4294967294]);
+// CHECK-NEXT: 4294967295 arrEnd
+try { a.push('a','b','c'); } catch (e) { print('caught', e.name) }
+// CHECK-NEXT: caught RangeError
+print(a[4294967295], a[4294967296], a[4294967297]);
+// CHECK-NEXT: a b c
+Array.prototype[1] = 'asdf';
+Object.defineProperty(Array.prototype, '1', {
+  value: 'asdf',
+  writable: false,
+  configurable: true,
 });
-a.reverse();
-print(a);
-// CHECK-NEXT: setter
-// CHECK-NEXT: -1,2,,-1
-var a = [0, 1];
-Object.defineProperty(a, 0, {
-  get: function() {
-    a.pop();
-    return -1;
-  }
-});
-a.reverse();
-print(a);
-// CHECK-NEXT: ,-1
 var a = [];
-Object.defineProperties(a, {
-  '0': {
-    get: function() {
-      print('getter 0');
-      return a.val_0;
-    },
-    set: function(v) { a.val_0 = v; }
-  },
-  '1': {
-    get: function() {
-      print('getter 1');
-      return a.val_1;
-    },
-    set: function(v) { a.val_1 = v; }
-  },
+try { a.push('x','y','z'); } catch (e) { print('caught', e.name) }
+// CHECK-NEXT: caught TypeError
+delete Array.prototype[1];
+Object.defineProperty(Array.prototype, '1', {
+  get: function() { return 'asdf'; },
+  set: function() { print('setter'); },
+  configurable: true,
 });
-a[0] = 0;
-a[1] = 1;
-a.reverse();
-print(a);
-// CHECK-NEXT: getter 0
-// CHECK-NEXT: getter 1
-// CHECK-NEXT: getter 0
-// CHECK-NEXT: getter 1
-// CHECK-NEXT: 1,0
-var a = [0, 1, 2, 3, 4, 5, 6];
-Object.defineProperties(a, {
-  '0': {
-    get: function() {
-      a.pop();
-      return -1;
-    }
-  },
-  '1': {
-    set: function() { a.push('a'); }
-  },
-  '2': {
-    get: function() {
-      a.push('b');
-      return -2;
-    },
-    set: function() { a.pop(); }
-  }
-});
-a.reverse();
-print(a);
-// CHECK-NEXT: ,,-2,3,-2,,-1,a
+var a = [];
+print(a.push(1,2), a);
+// CHECK-NEXT: setter
+// CHECK-NEXT: 2 1,asdf
+delete Array.prototype[1];
+var a = [];
+a[0] = 'x1';
+a[10000] = 'x2';
+print(a.push('last'), a[0], a[10000], a[10001]);
+// CHECK-NEXT: 10002 x1 x2 last
+a = null;
+var a = {length: 2**53 - 1};
+try { a.push(1); } catch (e) { print('caught', e.name) }
+// CHECK-NEXT: caught TypeError
 
 print('shift');
 // CHECK-LABEL: shift
@@ -545,6 +516,42 @@ a.__proto__ = new Proxy([],{});
 a.sort();
 print(a);
 // CHECK-NEXT: 1,
+
+print('splice');
+// CHECK-LABEL: splice
+var a = ['a','b','c','d'];
+print(a.splice(), a);
+// CHECK-NEXT:  a,b,c,d
+var a = ['a','b','c','d'];
+print(a.splice(1), a);
+// CHECK-NEXT: b,c,d a
+var a = ['a','b','c','d'];
+print(a.splice(1, 2), a);
+// CHECK-NEXT: b,c a,d
+var a = ['a','b','c','d'];
+print(a.splice(1, 2, 'x'), a);
+// CHECK-NEXT: b,c a,x,d
+var a = ['a','b','c','d'];
+print(a.splice(1, 2, 'x', 'y', 'z'), a);
+// CHECK-NEXT: b,c a,x,y,z,d
+var a = ['a','b','c','d'];
+print(a.splice(1, 1000, 'x', 'y', 'z'), a);
+// CHECK-NEXT: b,c,d a,x,y,z
+var a = ['a','b','c','d'];
+print(a.splice(-1, 1, 'x', 'y', 'z'), a);
+// CHECK-NEXT: d a,b,c,x,y,z
+var a = ['a','b','c','d'];
+print(a.splice(-1, 1, 'x', 'y', 'z'), a);
+// CHECK-NEXT: d a,b,c,x,y,z
+var a = ['a','b','c','d'];
+print(a.splice(2, 0, 'x', 'y', 'z'), a);
+// CHECK-NEXT:  a,b,x,y,z,c,d
+var a = ['a','b','c','d'];
+print(a.splice(2, -100, 'x', 'y', 'z'), a);
+// CHECK-NEXT:  a,b,x,y,z,c,d
+var a = ['a',,'b',,,'c'];
+print(a.splice(0, 3, 'x', 'y'), a);
+// CHECK-NEXT: a,,b x,y,,,c
 
 print('unshift');
 // CHECK-LABEL: unshift
@@ -1004,12 +1011,6 @@ print(arrayEquals([1,[2,[3,[4]]]].flat(2), [1,2,3,[4]]));
 // CHECK-NEXT: true
 print(arrayEquals([1,[2,[3,[4]]]].flat(Infinity), [1,2,3,4]));
 // CHECK-NEXT: true
-var a = [1];
-for (var i = 0; i < 100000; ++i) {
-  a = [a];
-}
-try { a.flat(Infinity); } catch(e) { print('caught', e.name) }
-// CHECK-NEXT: caught RangeError
 
 print('flatMap');
 // CHECK-LABEL: flatMap
@@ -1046,21 +1047,6 @@ print(Array.prototype.at.call({length: 3, 0: 'a', 1: 'b', 2: 'c'}, -1));
 // CHECK-NEXT: c
 print(Array.prototype.at.call({length: 30}, 5));
 // CHECK-NEXT: undefined
-
-print('toReversed');
-// CHECK-LABEL: toReversed
-print(Array.prototype.toReversed.length);
-// CHECK-NEXT: 0
-var a = [1,2,3,4];
-print(a.toReversed().toString())
-// CHECK-NEXT: 4,3,2,1
-print(a.toString())
-// CHECK-NEXT: 1,2,3,4
-print(arrayEquals([ 1, 2, 3 ].toReversed(), [ 3, 2, 1 ]));
-// CHECK-NEXT: true
-print(Array.prototype.toReversed.call({length : 3, 0 : 'a', 1 : 'b', 2 : 'c'})
-          .toString())
-// CHECK-NEXT: c,b,a
 
 print('toSpliced');
 // CHECK-LABEL: toSpliced

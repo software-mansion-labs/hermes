@@ -42,7 +42,7 @@ class Runtime;
 // Ensure that HermesValue tags are handled correctly by updating this every
 // time the HERMESVALUE_VERSION changes, and going through the JIT and updating
 static_assert(
-    HERMESVALUE_VERSION == 1,
+    HERMESVALUE_VERSION == 2,
     "HermesValue version mismatch, HermesValue methods may need to be updated");
 
 /// A NaN-box encoded value.
@@ -87,6 +87,7 @@ class HermesValue : public HermesValueBase {
     Object2 = HVETag_Object2,
 
     FirstPointer = HVETag_FirstPointer,
+    LastNumberOrCompressible = HVETag_LastNumberOrCompressible,
   };
 
   /// Number of bits used in the high part to encode the sign, exponent and tag.
@@ -124,9 +125,14 @@ class HermesValue : public HermesValueBase {
   constexpr inline static HermesValue fromRaw(RawType raw) {
     return HermesValue(raw);
   }
+  constexpr inline static HermesValue fromTagAndValue(Tag tag, RawType value) {
+    return HermesValue(value, tag);
+  }
 
-  /// Dump the contents to stderr.
-  void dump(llvh::raw_ostream &stream = llvh::errs()) const;
+  /// Dump the contents with \n.
+  void dump(llvh::raw_ostream &stream) const;
+  /// Dump the contents to stderr with \n.
+  void dump() const;
 
   inline Tag getTag() const {
     return (Tag)((int64_t)this->raw >> kNumDataBits);
@@ -212,7 +218,7 @@ class HermesValue : public HermesValueBase {
   }
 
   constexpr inline static HermesValue encodeBoolValue(bool val) {
-    return HermesValue((uint64_t)(val), ETag::Bool);
+    return HermesValue((uint64_t)(val) << kHV_BoolBitIdx, ETag::Bool);
   }
 
   inline static constexpr HermesValue encodeNullValue() {
@@ -323,6 +329,13 @@ class HermesValue : public HermesValueBase {
   inline bool isDouble() const {
     return this->raw < ((uint64_t)Tag::First << kNumDataBits);
   }
+  /// Return true if this value is either to a number, or is encoded entirely in
+  /// its most significant 29 bits, with the rest being 0. This is used by
+  /// HermesValue32 to determine whether the value should be considered for
+  /// storage in "compressed HV64" form.
+  inline bool isNumberOrCompressible() const {
+    return (uint32_t)getETag() <= (uint32_t)ETag::LastNumberOrCompressible;
+  }
   inline bool isPointer() const {
     return this->raw >= ((uint64_t)Tag::FirstPointer << kNumDataBits);
   }
@@ -337,7 +350,7 @@ class HermesValue : public HermesValueBase {
     return (this->raw & kMask) == (encodeNaNValue().raw & kMask);
   }
 
-  inline RawType getRaw() const {
+  inline constexpr RawType getRaw() const {
     return this->raw;
   }
 
@@ -373,7 +386,7 @@ class HermesValue : public HermesValueBase {
 
   inline bool getBool() const {
     assert(isBool());
-    return (bool)(this->raw & 0x1);
+    return _sh_ljs_get_bool(*this);
   }
 
   inline StringPrimitive *getString() const {
@@ -616,7 +629,14 @@ struct GCHermesValueUtil {
       PinnedHermesValue *result);
 };
 
-llvh::raw_ostream &operator<<(llvh::raw_ostream &OS, HermesValue hv);
+/// Dump a SHLegacyValue to \p OS.
+llvh::raw_ostream &dumpHermesValue(llvh::raw_ostream &OS, SHLegacyValue lhv);
+/// Dump a SHLegacyValue to llvh::errs() with \n.
+void dumpHermesValue(SHLegacyValue lhv);
+
+inline llvh::raw_ostream &operator<<(llvh::raw_ostream &OS, HermesValue lhv) {
+  return dumpHermesValue(OS, lhv);
+}
 
 } // end namespace vm
 } // end namespace hermes

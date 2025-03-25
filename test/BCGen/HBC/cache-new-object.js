@@ -45,18 +45,17 @@ function simple(x, y) {
 // CHECK-NEXT:Function<global>(1 params, 3 registers, 0 numbers, 1 non-pointers):
 // CHECK-NEXT:Offset in debug table: source 0x0000, lexical 0x0000
 // CHECK-NEXT:    DeclareGlobalVar  "simple"
-// CHECK-NEXT:    CreateTopLevelEnvironment r1, 0
-// CHECK-NEXT:    CreateClosure     r2, r1, Function<simple>
 // CHECK-NEXT:    GetGlobalObject   r1
-// CHECK-NEXT:    PutByIdLoose      r1, r2, 1, "simple"
 // CHECK-NEXT:    LoadConstUndefined r0
+// CHECK-NEXT:    CreateClosure     r2, r0, Function<simple>
+// CHECK-NEXT:    PutByIdLoose      r1, r2, 1, "simple"
 // CHECK-NEXT:    Ret               r0
 
 // CHECK:Function<simple>(3 params, 3 registers, 0 numbers, 1 non-pointers):
 // CHECK-NEXT:Offset in debug table: source 0x000a, lexical 0x0000
 // CHECK-NEXT:    LoadThisNS        r2
 // CHECK-NEXT:    GetNewTarget      r1
-// CHECK-NEXT:    CacheNewObject    r2, 0
+// CHECK-NEXT:    CacheNewObject    r2, r1, 0, 0
 // CHECK-NEXT:    LoadParam         r1, 1
 // CHECK-NEXT:    PutByIdLoose      r2, r1, 1, "x"
 // CHECK-NEXT:    LoadParam         r1, 2
@@ -73,8 +72,8 @@ function simple(x, y) {
 // CHECK:Debug source table:
 // CHECK-NEXT:  0x0000  function idx 0, starts at line 10 col 1
 // CHECK-NEXT:    bc 0: line 10 col 1
-// CHECK-NEXT:    bc 18: line 10 col 1
+// CHECK-NEXT:    bc 14: line 10 col 1
 // CHECK-NEXT:  0x000a  function idx 1, starts at line 10 col 1
-// CHECK-NEXT:    bc 13: line 12 col 10
-// CHECK-NEXT:    bc 22: line 13 col 10
+// CHECK-NEXT:    bc 15: line 12 col 10
+// CHECK-NEXT:    bc 24: line 13 col 10
 // CHECK-NEXT:  0x0014  end of debug source table

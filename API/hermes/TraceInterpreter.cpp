@@ -8,6 +8,7 @@
 #include <hermes/TraceInterpreter.h>
 
 #include <hermes/BCGen/HBC/BCProvider.h>
+#include <hermes/Support/JSONEmitter.h>
 #include <hermes/SynthTraceParser.h>
 #include <hermes/TracingRuntime.h>
 #include <hermes/VM/instrumentation/PerfEvents.h>
@@ -822,16 +823,27 @@ void TraceInterpreter::executeRecords() {
           const auto &csr =
               static_cast<const SynthTrace::CreateStringRecord &>(*rec);
           Value str;
-          if (csr.ascii_) {
-            str = String::createFromAscii(
-                rt_, csr.chars_.data(), csr.chars_.size());
-          } else {
-            str = String::createFromUtf8(
-                rt_,
-                reinterpret_cast<const uint8_t *>(csr.chars_.data()),
-                csr.chars_.size());
+          switch (csr.encodingType_) {
+            case SynthTrace::StringEncodingType::ASCII:
+              str = String::createFromAscii(
+                  rt_, csr.chars_.data(), csr.chars_.size());
+              TRACE_EXPECT_EQ(csr.chars_, str.asString(rt_).utf8(rt_));
+              break;
+            case SynthTrace::StringEncodingType::UTF8:
+              str = String::createFromUtf8(
+                  rt_,
+                  reinterpret_cast<const uint8_t *>(csr.chars_.data()),
+                  csr.chars_.size());
+              TRACE_EXPECT_EQ(csr.chars_, str.asString(rt_).utf8(rt_));
+              break;
+            case SynthTrace::StringEncodingType::UTF16:
+              str = String::createFromUtf16(
+                  rt_, csr.chars16_.data(), csr.chars16_.size());
+              TRACE_EXPECT_EQ_UTF16(csr.chars16_, str.asString(rt_).utf16(rt_));
+              break;
+            default:
+              llvm_unreachable("No other way to construct String");
           }
-          TRACE_EXPECT_EQ(csr.chars_, str.asString(rt_).utf8(rt_));
           addToObjectMap(csr.objID_, std::move(str), currentExecIndex);
           break;
         }
@@ -840,22 +852,30 @@ void TraceInterpreter::executeRecords() {
               static_cast<const SynthTrace::CreatePropNameIDRecord &>(*rec);
           // We perform the calls below for their side effects (for example,
           jsi::PropNameID propNameID = [&] {
-            switch (cpnr.valueType_) {
-              case SynthTrace::CreatePropNameIDRecord::ASCII:
+            switch (cpnr.encodingType_) {
+              case SynthTrace::StringEncodingType::ASCII:
                 return PropNameID::forAscii(rt_, cpnr.chars_);
-              case SynthTrace::CreatePropNameIDRecord::UTF8:
+              case SynthTrace::StringEncodingType::UTF8:
                 return PropNameID::forUtf8(rt_, cpnr.chars_);
-              case SynthTrace::CreatePropNameIDRecord::TRACEVALUE: {
-                auto val = traceValueToJSIValue(cpnr.traceValue_);
-                if (val.isSymbol())
-                  return PropNameID::forSymbol(rt_, val.getSymbol(rt_));
-                return PropNameID::forString(rt_, val.getString(rt_));
-              }
+              case SynthTrace::StringEncodingType::UTF16:
+                return PropNameID::forUtf16(rt_, cpnr.chars16_);
             }
             llvm_unreachable("No other way to construct PropNameID");
           }();
           addToPropNameIDMap(
               cpnr.propNameID_, std::move(propNameID), currentExecIndex);
+          break;
+        }
+        case RecordType::CreatePropNameIDWithValue: {
+          const auto &record =
+              static_cast<const SynthTrace::CreatePropNameIDWithValueRecord &>(
+                  *rec);
+          auto val = traceValueToJSIValue(record.traceValue_);
+          PropNameID propNameID = val.isSymbol()
+              ? PropNameID::forSymbol(rt_, val.getSymbol(rt_))
+              : PropNameID::forString(rt_, val.getString(rt_));
+          addToPropNameIDMap(
+              record.propNameID_, std::move(propNameID), currentExecIndex);
           break;
         }
         case RecordType::CreateHostObject: {
@@ -1318,6 +1338,39 @@ std::string TraceInterpreter::printStats() {
   }
   std::string stats = rt_.instrumentation().getRecordedGCStats();
   ::hermes::vm::instrumentation::PerfEvents::endAndInsertStats(stats);
+
+  if (options_.gcAnalyticsEvents) {
+    llvh::raw_string_ostream os{stats};
+    os << "Collections:\n";
+    ::hermes::JSONEmitter json{os, /*pretty*/ true};
+    json.openArray();
+    for (const auto &event : *options_.gcAnalyticsEvents) {
+      json.openDict();
+      json.emitKeyValue("runtimeDescription", event.runtimeDescription);
+      json.emitKeyValue("gcKind", event.gcKind);
+      json.emitKeyValue("collectionType", event.collectionType);
+      json.emitKeyValue("cause", event.cause);
+      json.emitKeyValue("duration", event.duration.count());
+      json.emitKeyValue("cpuDuration", event.cpuDuration.count());
+      json.emitKeyValue("preAllocated", event.allocated.before);
+      json.emitKeyValue("postAllocated", event.allocated.after);
+      json.emitKeyValue("preSize", event.size.before);
+      json.emitKeyValue("postSize", event.size.after);
+      json.emitKeyValue("preExternal", event.external.before);
+      json.emitKeyValue("postExternal", event.external.after);
+      json.emitKeyValue("survivalRatio", event.survivalRatio);
+      json.emitKey("tags");
+      json.openArray();
+      for (const auto &tag : event.tags) {
+        json.emitValue(tag);
+      }
+      json.closeArray();
+      json.closeDict();
+    }
+    json.closeArray();
+    os << "\n";
+  }
+
 #ifdef HERMESVM_PROFILER_OPCODE
   stats += "\n";
   std::ostringstream os;

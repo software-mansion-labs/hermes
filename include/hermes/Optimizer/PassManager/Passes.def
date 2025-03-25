@@ -37,6 +37,7 @@ PASS(
     ScopeElimination,
     "scopeelimination",
     "Optimizations to eliminate unnecessary scopes")
+PASS(ScopeHoisting, "scopehoisting", "Move scopes up the scope chain")
 PASS(InstSimplify, "instsimplify", "Simplify instructions")
 PASS(SimpleStackPromotion, "simplestackpromotion", "Simple stack promotion")
 PASS(
@@ -53,10 +54,6 @@ PASS(FunctionAnalysis, "functionanalysis", "Function analysis")
 PASS(Inlining, "inlining", "Inlining")
 PASS(ResolveStaticRequire, "staticrequire", "Resolve static require")
 PASS(MetroRequire, "metrorequire", "Optimize Metro require calls")
-PASS(
-    HoistStartGenerator,
-    "hoiststartgenerator",
-    "Move StartGenerator to start of function")
 PASS(Auditor, "auditor", "Auditor")
 PASS(TDZDedup, "tdzdedup", "TDZ Deduplication")
 PASS(StripDebugInsts, "stripdebug", "Strip debug instructions")

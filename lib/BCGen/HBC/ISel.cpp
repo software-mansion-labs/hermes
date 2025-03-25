@@ -50,6 +50,9 @@ STATISTIC(
 STATISTIC(
     NumCacheSlots,
     "Number of cache slots allocated for all put/get property instructions");
+STATISTIC(
+    NumPutCacheSlots,
+    "Number of cache slots allocated for all put property instructions");
 
 /// Given a list of basic blocks \p blocks linearized into the order they will
 /// be generated, \return the set of those basic blocks containing backwards
@@ -202,13 +205,24 @@ class HBCISel {
   uint8_t lastPropertyReadCacheIndex_{0};
   uint8_t lastPropertyWriteCacheIndex_{0};
 
-  /// Map from property name to the read/write cache index for that name.
-  llvh::DenseMap<Identifier, uint8_t> propertyReadCacheIndexForId_;
+  /// The next index to use for CacheNewObject.
+  uint8_t numCacheNewObject_{0};
+
+  /// This enum is used to provide extra, distinguishing information to the
+  /// property reads that would otherwise share of cache index.
+  enum class PropCacheKind : uint8_t { NormalIdentifier = 0, WithReceiver };
+
+  /// Map from property name & kind to the read cache index for that name.
+  llvh::DenseMap<std::pair<Identifier, int>, uint8_t>
+      propertyReadCacheIndexForId_;
   llvh::DenseMap<Identifier, uint8_t> propertyWriteCacheIndexForId_;
 
   /// Compute and return the index to use for caching the read/write of a
   /// property with the given identifier name.
-  uint8_t acquirePropertyReadCacheIndex(Identifier prop);
+  /// \param k is the kind of property read cache being acquired.
+  uint8_t acquirePropertyReadCacheIndex(
+      Identifier prop,
+      PropCacheKind k = PropCacheKind::NormalIdentifier);
   uint8_t acquirePropertyWriteCacheIndex(Identifier prop);
 
   /// A cache mapping from buffer ID to filelname+source map.
@@ -441,9 +455,6 @@ inline FileAndSourceMapId HBCISel::obtainFileAndSourceMapId(
     sourceMappingUrl = sm.getSourceMappingUrl(bufId);
   }
 
-  // Lazily compiled functions ask to strip the source mapping URL because
-  // it was already encoded in the top level module, and it could be a 1MB+
-  // data url that we don't want to duplicate once per function.
   if (sourceMappingUrl.empty()) {
     currentSourceMappingUrlId = kInvalidSourceMappingUrlId;
   } else {
@@ -530,6 +541,7 @@ void HBCISel::addDebugLexicalInfo() {
 void HBCISel::populatePropertyCachingInfo() {
   BCFGen_->setHighestReadCacheIndex(lastPropertyReadCacheIndex_);
   BCFGen_->setHighestWriteCacheIndex(lastPropertyWriteCacheIndex_);
+  BCFGen_->setNumCacheNewObject(numCacheNewObject_);
 }
 
 void HBCISel::generateDirectEvalInst(DirectEvalInst *Inst, BasicBlock *next) {
@@ -807,6 +819,18 @@ void HBCISel::generateBinaryOperatorInst(
       break;
   }
 }
+
+void HBCISel::generateStorePropertyWithReceiverInst(
+    StorePropertyWithReceiverInst *Inst,
+    BasicBlock *next) {
+  auto valueReg = encodeValue(Inst->getStoredValue());
+  auto objReg = encodeValue(Inst->getObject());
+  auto propReg = encodeValue(Inst->getProperty());
+  auto receiverReg = encodeValue(Inst->getReceiver());
+  BCFGen_->emitPutByValWithReceiver(
+      objReg, propReg, valueReg, receiverReg, Inst->getIsStrict());
+}
+
 void HBCISel::generateStorePropertyLooseInst(
     StorePropertyLooseInst *Inst,
     BasicBlock *next) {
@@ -907,23 +931,43 @@ void HBCISel::generateDefineOwnPropertyInst(
   auto valueReg = encodeValue(Inst->getStoredValue());
   auto objReg = encodeValue(Inst->getObject());
   Value *prop = Inst->getProperty();
-  bool isEnumerable = Inst->getIsEnumerable();
 
   // If the property is a LiteralNumber, the property is enumerable, and it is a
   // valid array index, it is coming from an array initialization and we will
   // emit it as DefineOwnByIndex.
   auto *numProp = llvh::dyn_cast<LiteralNumber>(prop);
-  if (numProp && isEnumerable) {
-    if (auto arrayIndex = numProp->convertToArrayIndex()) {
-      uint32_t index = arrayIndex.getValue();
-      if (index <= UINT8_MAX) {
-        BCFGen_->emitDefineOwnByIndex(objReg, valueReg, index);
-      } else {
-        BCFGen_->emitDefineOwnByIndexL(objReg, valueReg, index);
-      }
-
-      return;
+  if (numProp) {
+    assert(
+        Inst->getIsEnumerable() &&
+        "Non-enumerable properties with literal keys should be handled by LoadConstants");
+    uint32_t index = numProp->convertToArrayIndex().getValue();
+    if (index <= UINT8_MAX) {
+      BCFGen_->emitDefineOwnByIndex(objReg, valueReg, index);
+    } else {
+      BCFGen_->emitDefineOwnByIndexL(objReg, valueReg, index);
     }
+    return;
+  }
+
+  if (auto *Lit = llvh::dyn_cast<LiteralString>(prop)) {
+    assert(
+        Inst->getIsEnumerable() &&
+        "Non-enumerable properties with literal keys should be handled by LoadConstants");
+    auto id = BCFGen_->getIdentifierID(Lit);
+    if (id <= UINT16_MAX) {
+      BCFGen_->emitDefineOwnById(
+          objReg,
+          valueReg,
+          acquirePropertyWriteCacheIndex(Lit->getValue()),
+          id);
+    } else {
+      BCFGen_->emitDefineOwnByIdLong(
+          objReg,
+          valueReg,
+          acquirePropertyWriteCacheIndex(Lit->getValue()),
+          id);
+    }
+    return;
   }
 
   // It is a register operand.
@@ -938,12 +982,9 @@ void HBCISel::generateDefineNewOwnPropertyInst(
   auto valueReg = encodeValue(Inst->getStoredValue());
   auto objReg = encodeValue(Inst->getObject());
   auto prop = Inst->getProperty();
-  bool isEnumerable = Inst->getIsEnumerable();
+  assert(Inst->getIsEnumerable() && "must be enumerable");
 
   if (auto *numProp = llvh::dyn_cast<LiteralNumber>(prop)) {
-    assert(
-        isEnumerable &&
-        "No way to generate non-enumerable indexed DefineNewOwnPropertyInst.");
     uint32_t index = *numProp->convertToArrayIndex();
     if (index <= UINT8_MAX) {
       BCFGen_->emitDefineOwnByIndex(objReg, valueReg, index);
@@ -955,21 +996,18 @@ void HBCISel::generateDefineNewOwnPropertyInst(
 
   auto strProp = cast<LiteralString>(prop);
   auto id = BCFGen_->getIdentifierID(strProp);
-
-  if (isEnumerable) {
-    if (id > UINT16_MAX) {
-      BCFGen_->emitPutNewOwnByIdLong(objReg, valueReg, id);
-    } else if (id > UINT8_MAX) {
-      BCFGen_->emitPutNewOwnById(objReg, valueReg, id);
-    } else {
-      BCFGen_->emitPutNewOwnByIdShort(objReg, valueReg, id);
-    }
+  if (id <= UINT16_MAX) {
+    BCFGen_->emitDefineOwnById(
+        objReg,
+        valueReg,
+        acquirePropertyWriteCacheIndex(strProp->getValue()),
+        id);
   } else {
-    if (id > UINT16_MAX) {
-      BCFGen_->emitPutNewOwnNEByIdLong(objReg, valueReg, id);
-    } else {
-      BCFGen_->emitPutNewOwnNEById(objReg, valueReg, id);
-    }
+    BCFGen_->emitDefineOwnByIdLong(
+        objReg,
+        valueReg,
+        acquirePropertyWriteCacheIndex(strProp->getValue()),
+        id);
   }
 }
 
@@ -1047,6 +1085,30 @@ void HBCISel::generateLoadPropertyInst(
   BCFGen_->emitGetByVal(resultReg, objReg, propReg);
 }
 
+void HBCISel::generateLoadPropertyWithReceiverInst(
+    LoadPropertyWithReceiverInst *Inst,
+    BasicBlock *next) {
+  auto resultReg = encodeValue(Inst);
+  auto objReg = encodeValue(Inst->getObject());
+  auto receiverReg = encodeValue(Inst->getReceiver());
+  auto prop = Inst->getProperty();
+
+  if (auto *Lit = llvh::dyn_cast<LiteralString>(prop)) {
+    auto id = BCFGen_->getIdentifierID(Lit);
+    BCFGen_->emitGetByIdWithReceiverLong(
+        resultReg,
+        objReg,
+        acquirePropertyReadCacheIndex(
+            Lit->getValue(), PropCacheKind::WithReceiver),
+        receiverReg,
+        id);
+    return;
+  }
+
+  auto propReg = encodeValue(prop);
+  BCFGen_->emitGetByValWithReceiver(resultReg, objReg, propReg, receiverReg);
+}
+
 void HBCISel::generateTryLoadGlobalPropertyInst(
     TryLoadGlobalPropertyInst *Inst,
     BasicBlock *next) {
@@ -1098,6 +1160,20 @@ void HBCISel::generateAllocObjectLiteralInst(
   assert(
       Inst->getKeyValuePairCount() == 0 &&
       "AllocObjectLiteralInst with properties should be lowered to HBCAllocObjectFromBufferInst");
+  if (llvh::isa<EmptySentinel>(Inst->getParentObject())) {
+    BCFGen_->emitNewObject(result);
+  } else {
+    auto parentReg = encodeValue(Inst->getParentObject());
+    BCFGen_->emitNewObjectWithParent(result, parentReg);
+  }
+}
+void HBCISel::generateAllocTypedObjectInst(
+    AllocTypedObjectInst *Inst,
+    BasicBlock *) {
+  auto result = encodeValue(Inst);
+  assert(
+      Inst->getKeyValuePairCount() == 0 &&
+      "AllocTypedObjectInst with properties should be lowered to HBCAllocObjectFromBufferInst");
   if (llvh::isa<EmptySentinel>(Inst->getParentObject())) {
     BCFGen_->emitNewObject(result);
   } else {
@@ -1240,10 +1316,16 @@ void HBCISel::generateThrowIfInst(
     hermes::ThrowIfInst *Inst,
     hermes::BasicBlock *next) {
   assert(
-      Inst->getInvalidTypes()->getData().isEmptyType() &&
-      "Only Empty supported");
-  BCFGen_->emitThrowIfEmpty(
-      encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+      (Inst->getInvalidTypes()->getData().isEmptyType() ||
+       Inst->getInvalidTypes()->getData().isUninitType()) &&
+      "Only Empty/Undefined supported");
+  if (Inst->getInvalidTypes()->getData().isEmptyType()) {
+    BCFGen_->emitThrowIfEmpty(
+        encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+  } else {
+    BCFGen_->emitThrowIfUndefined(
+        encodeValue(Inst), encodeValue(Inst->getCheckedValue()));
+  }
 }
 void HBCISel::generateThrowIfThisInitializedInst(
     hermes::ThrowIfThisInitializedInst *Inst,
@@ -1271,11 +1353,6 @@ void HBCISel::generateCreateGeneratorInst(
   } else {
     BCFGen_->emitCreateGeneratorLongIndex(output, env, code);
   }
-}
-void HBCISel::generateStartGeneratorInst(
-    StartGeneratorInst *Inst,
-    BasicBlock *next) {
-  llvm_unreachable("StartGeneratorInst should have been lowered");
 }
 void HBCISel::generateResumeGeneratorInst(
     ResumeGeneratorInst *Inst,
@@ -1819,7 +1896,7 @@ void HBCISel::generateHBCReifyArgumentsStrictInst(
 void HBCISel::generateCreateThisInst(CreateThisInst *Inst, BasicBlock *next) {
   auto output = encodeValue(Inst);
   auto closure = encodeValue(Inst->getClosure());
-  if (llvh::isa<EmptySentinel>(Inst->getNewTarget())) {
+  if (Inst->getNewTarget() == Inst->getClosure()) {
     BCFGen_->emitCreateThisForNew(
         output, closure, acquirePropertyReadCacheIndex(prototypeIdent_));
   } else {
@@ -1881,10 +1958,17 @@ void HBCISel::generateCacheNewObjectInst(
     hermes::CacheNewObjectInst *Inst,
     hermes::BasicBlock *next) {
   auto thisReg = encodeValue(Inst->getThis());
+  auto newTargetReg = encodeValue(Inst->getNewTarget());
 
   auto bufIndex =
       BCFGen_->getBytecodeModuleGenerator().serializedLiteralOffsetFor(Inst);
-  BCFGen_->emitCacheNewObject(thisReg, bufIndex.shapeTableIdx);
+  // We only have 8 bits for the total number of CacheNewObject entries, so the
+  // maximum entry index is UINT8_MAX - 1. If we exceed that, we can just skip
+  // this instruction, since it is purely an optimization.
+  if (numCacheNewObject_ < UINT8_MAX) {
+    BCFGen_->emitCacheNewObject(
+        thisReg, newTargetReg, bufIndex.shapeTableIdx, numCacheNewObject_++);
+  }
 }
 
 void HBCISel::generateCreateClassInst(CreateClassInst *Inst, BasicBlock *next) {
@@ -2142,8 +2226,11 @@ void HBCISel::generateFastArrayStoreInst(
 void HBCISel::generateThrowTypeErrorInst(ThrowTypeErrorInst *, BasicBlock *) {
   hermes_fatal("ThrowTypeErrorInst should have been lowered.");
 }
-void HBCISel::generateCheckedTypeCastInst(CheckedTypeCastInst *, BasicBlock *) {
-  hermes_fatal("CheckedTypeCastInst not supported.");
+void HBCISel::generateCheckedTypeCastInst(
+    CheckedTypeCastInst *inst,
+    BasicBlock *) {
+  // TODO: Implement an actual checked cast.
+  emitMovIfNeeded(encodeValue(inst), encodeValue(inst->getCheckedValue()));
 }
 void HBCISel::generateFastArrayAppendInst(
     FastArrayAppendInst *inst,
@@ -2316,11 +2403,13 @@ void HBCISel::run(SourceMapGenerator *outSourceMap) {
   BCFGen_->bytecodeGenerationComplete();
 }
 
-uint8_t HBCISel::acquirePropertyReadCacheIndex(Identifier prop) {
+uint8_t HBCISel::acquirePropertyReadCacheIndex(
+    Identifier prop,
+    PropCacheKind k) {
   const bool reuse = F_->getContext().getOptimizationSettings().reusePropCache;
   // Zero is reserved for indicating no-cache, so cannot be a value in the map.
   uint8_t dummyZero = 0;
-  auto &idx = reuse ? propertyReadCacheIndexForId_[prop] : dummyZero;
+  auto &idx = reuse ? propertyReadCacheIndexForId_[{prop, (int)k}] : dummyZero;
   if (idx) {
     ++NumCachedNodes;
     return idx;
@@ -2357,6 +2446,7 @@ uint8_t HBCISel::acquirePropertyWriteCacheIndex(Identifier prop) {
 
   ++NumCachedNodes;
   ++NumCacheSlots;
+  ++NumPutCacheSlots;
   idx = ++lastPropertyWriteCacheIndex_;
   return idx;
 }

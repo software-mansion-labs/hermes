@@ -255,11 +255,15 @@ static opt<bool> Pretty(
     desc("Pretty print JSON, JS or disassembled bytecode"),
     cat(CompilerCategory));
 
+#if HERMES_PARSE_FLOW
 static opt<bool> Typed(
     "typed",
     init(false),
     desc("Enable typed mode"),
     cat(CompilerCategory));
+#else
+static constexpr bool Typed = false;
+#endif
 
 cl::opt<bool> Script(
     "script",
@@ -317,13 +321,6 @@ opt<bool> BasicBlockProfiling(
 opt<std::string> ProfilingOutFile(
     "profiling-out",
     desc("File to write profiling info to"));
-
-opt<bool> ES6Class(
-    "Xes6-class",
-    init(false),
-    desc("Enable support for ES6 Class"),
-    Hidden,
-    cat(CompilerCategory));
 
 opt<bool> ES6BlockScoping(
     "Xes6-block-scoping",
@@ -588,6 +585,13 @@ static opt<bool> ReusePropCache(
 static CLFlag
     Inline('f', "inline", true, "inlining of functions", CompilerCategory);
 
+static CLFlag ReorderRegisters(
+    'f',
+    "reorder-registers",
+    true,
+    "reorder registers for better JIT performance",
+    CompilerCategory);
+
 static opt<unsigned> InlineMaxSize(
     "Xinline-max-size",
     cl::init(1),
@@ -850,6 +854,7 @@ ESTree::NodePtr parseJS(
     return parsedAST;
   }
 
+#if HERMES_PARSE_TS
   // Convert TS AST to Flow AST as an intermediate step until we have a
   // separate TS type checker.
   if (flowContext && context->getParseTS()) {
@@ -859,6 +864,7 @@ ESTree::NodePtr parseJS(
       return nullptr;
     }
   }
+#endif
 
   // If we are executing in typed mode and not script, then wrap the program.
   if (shouldWrapInIIFE) {
@@ -1113,7 +1119,6 @@ std::shared_ptr<Context> createContext(
   // Default is non-strict mode, unless it is typed..
   context->setStrictMode((!cl::NonStrictMode && cl::StrictMode) || cl::Typed);
   context->setEnableEval(cl::EnableEval);
-  context->setConvertES6Classes(cl::ES6Class);
   context->setEnableES6BlockScoping(cl::ES6BlockScoping);
   context->setMetroRequireOpt(cl::MetroRequireOpt);
   context->getSourceErrorManager().setOutputOptions(guessErrorOutputOptions());
@@ -1164,11 +1169,15 @@ std::shared_ptr<Context> createContext(
   }
 #endif
 
+#if HERMES_PARSE_FLOW
   // If no type parser is specified, use flow by default.
-  if (cl::Typed && !cl::ParseFlow && !cl::ParseTS)
+  if (cl::Typed && !cl::ParseFlow
+#if HERMES_PARSE_TS
+      && !cl::ParseTS
+#endif
+  )
     cl::ParseFlow = true;
 
-#if HERMES_PARSE_FLOW
   if (cl::ParseFlow) {
     context->setParseFlow(ParseFlowSetting::ALL);
   }
@@ -1769,6 +1778,7 @@ CompileResult generateBytecodeForExecution(
       return BackendError;
     }
 
+    assert(BM && "BytecodeModule should not be null if no errors");
     result.bytecodeProvider = hbc::BCProviderFromSrc::createFromBytecodeModule(
         std::move(BM), std::move(compilationData));
   } else {
@@ -2052,6 +2062,7 @@ CompileResult processSourceFiles(
       cl::OutputSourceMap || cl::DebugInfoLevel == cl::DebugLevel::g0;
 
   genOptions.stripFunctionNames = cl::StripFunctionNames;
+  genOptions.reorderRegisters = cl::ReorderRegisters;
 
   // If the dump target is None, return bytecode in an executable form.
   if (cl::DumpTarget == Execute) {

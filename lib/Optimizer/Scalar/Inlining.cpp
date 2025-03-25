@@ -21,6 +21,9 @@
 #include "llvh/Support/Debug.h"
 
 STATISTIC(NumInlinedCalls, "Number of inlined calls");
+STATISTIC(
+    NumSpecInlinedCalls,
+    "Number of inlined calls that are speculatively inlined");
 
 namespace hermes {
 
@@ -216,6 +219,14 @@ static std::pair<bool, size_t> canBeInlined(Function *F) {
                 << "': copies rest args\n");
             return {false, 0};
           }
+          if (cast<CallBuiltinInst>(&I)->getBuiltinIndex() ==
+              BuiltinMethod::HermesBuiltin_applyArguments) {
+            LLVM_DEBUG(
+                llvh::dbgs()
+                << "Cannot inline function '" << F->getInternalNameStr()
+                << "': applies arguments\n");
+            return {false, 0};
+          }
           break;
         default:
           break;
@@ -352,7 +363,7 @@ static Value *inlineFunction(
           operandMap[&I] = callScope;
         } else {
           operandMap[&I] = builder.createGetClosureScopeInst(
-              GPS->getVariableScope(), CI->getCallee());
+              GPS->getVariableScope(), F, CI->getCallee());
         }
         continue;
       }
@@ -635,6 +646,8 @@ bool Inlining::runOnModule(Module *M) {
 
         // Continue inserting in inlineBB.
         builder.setInsertionBlock(inlineBB);
+
+        ++NumSpecInlinedCalls;
       }
 
       auto *returnValue = inlineFunction(builder, FC, CI, nextBlock);
